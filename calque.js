@@ -171,7 +171,7 @@
 
     function isHeaderCode(code) {
         var t = splitComment(code).code.trim();
-        return t.length > 1 && t.slice(-1) === ':';
+        return (t.length > 1 && t.slice(-1) === ':') || TYPED_HEADER_RE.test(t) || TYPE_DEF_RE.test(t);
     }
 
     function indentOf(code) {
@@ -213,10 +213,12 @@
             if (stream.peek() === '#') { stream.skipToEnd(); return 'comment'; }
             if (state.start) {
                 state.start = false;
-                if (stream.match(/^[^:#=]+:(?=\s*(#.*)?$)/)) return 'heading';
+                if (stream.match(/^@?[^:#=@]+:(?=\s*(@[^\s#]+)?\s*(#.*)?$)/)) return 'heading';
+                if (stream.match(/^\?/)) return 'keyword';
                 if (stream.match(/^_[\p{L}][\p{L}\p{N}_]*/u)) return 'keyword';
                 if (stream.match(/^[\p{L}_][\p{L}\p{N}_]*(?=\s*:=)/u)) return 'atom';
             }
+            if (stream.match(/^@[\p{L}_][\p{L}\p{N}_]*(\[\])?/u)) return 'typeName';
             if (stream.match(':=')) return 'operator';
             if (stream.match(/^\d+(\.\d+)?(e[+-]?\d+)?/i)) return 'number';
             if (stream.match(/^[\p{L}_][\p{L}\p{N}_]*/u)) return 'variableName';
@@ -231,7 +233,8 @@
         { tag: CM.tags.keyword, class: 'tok-formula' },
         { tag: CM.tags.atom, class: 'tok-nosum' },
         { tag: CM.tags.operator, class: 'tok-operator' },
-        { tag: CM.tags.number, class: 'tok-number' }
+        { tag: CM.tags.number, class: 'tok-number' },
+        { tag: CM.tags.typeName, class: 'tok-type' }
     ]);
 
     // Группа сворачивается до первой строки с тем же или меньшим отступом
@@ -441,7 +444,7 @@
                 }));
             }
             var d = calque.describeLine(line);
-            if (!d.data || (d.type !== 'result' && d.type !== 'percent' && d.type !== 'error')) return;
+            if (!d.data || (d.type !== 'result' && d.type !== 'percent' && d.type !== 'error' && d.type !== 'pass' && d.type !== 'fail')) return;
 
             var below = !!splitComment(line.code).comment;
             b.add(line.positionEnd, line.positionEnd, CM.Decoration.widget({
@@ -455,7 +458,7 @@
 
     // ---------- Автоформат ----------
 
-    var BINARY = { '+': 1, '-': 1, '*': 1, '/': 1, '=': 1, ':=': 1, '==': 1, '!=': 1, '<=': 1, '>=': 1, '<': 1, '>': 1 };
+    var BINARY = { '+': 1, '-': 1, '*': 1, '/': 1, '=': 1, ':=': 1, '==': 1, '!=': 1, '<=': 1, '>=': 1, '<': 1, '>': 1, '±': 1 };
     var OPENERS = { '(': 1, '[': 1 };
     var CLOSERS = { ')': 1, ']': 1 };
 
@@ -490,12 +493,15 @@
             var prevUnary = (p === '-' || p === '+') && prev.unary;
             tok.unary = unary;
             var sp;
-            if (t === ',' || t === ';') sp = false;
+            if (p === '?' && k === 1) sp = true;
+            else if (p === '@') sp = false;
+            else if (t === '@' && p === ':') sp = true;
+            else if (t === ',' || t === ';') sp = false;
             else if (p === ',' || p === ';') sp = true;
             else if (t === '^' || p === '^') sp = false;
             else if (CLOSERS[t] || OPENERS[p]) sp = false;
             else if (prevUnary) sp = false;
-            else if (t === ':' && k === tokens.length - 1) sp = false;
+            else if (t === ':' && (k === tokens.length - 1 || (tokens[k + 1] && tokens[k + 1].t === '@'))) sp = false;
             else if (BINARY[t] && !unary) sp = true;
             else if (BINARY[p] && !prevUnary) sp = true;
             else if (unary) sp = tok.space || !!BINARY[p] || p === ',';
@@ -585,13 +591,15 @@
         var out = [];
         calque.lines.forEach(function (line) {
             var message = line.error || line.rowError || (line.summing && !line.record ? line.groupError : null);
+            var severity = 'error';
+            if (!message && line.typeError) { message = line.typeError; severity = 'warning'; }
             if (!message) return;
             // Строку, которую сейчас набирают, не подчёркиваем
             if (head >= line.positionStart && head <= line.positionEnd) return;
             var bare = splitComment(line.code).code;
             if (!bare.trim()) return;
             var r = errorRange(line, message, bare);
-            out.push({ from: r.from, to: Math.min(r.to, state.doc.length), severity: 'error', message: message });
+            out.push({ from: r.from, to: Math.min(r.to, state.doc.length), severity: severity, message: message });
         });
         return out;
     };
@@ -840,6 +848,20 @@
     // «_имя» без выражения в строке таблицы — показать здесь формулу группы
     var INHERIT_RE = /^\s*__?([\p{L}][\p{L}\p{N}_]*)\s*$/u;
 
+    // Типы: «@Блюдо:» или «@Салат: @Блюдо» — объявление; «Цезарь: @Салат», «Обед: @Блюдо[]» — применение
+    var TYPE_DEF_RE = /^@([\p{L}_][\p{L}\p{N}_]*)\s*:\s*(?:@([\p{L}_][\p{L}\p{N}_]*))?$/u;
+    var TYPED_HEADER_RE = /^([^:#=@]+?):\s*@([\p{L}_][\p{L}\p{N}_]*)(\[\])?$/u;
+    var CHECK_RE = /^\s*\?\s*(.+)$/;
+    var NAME = '[\\p{L}_][\\p{L}\\p{N}_]*';
+
+    // Проверка: «A == B ± C» превращаем в «abs(A - B) <= C»
+    function checkSource(src) {
+        var m = src.match(/^(.*?)==(.*)±(.*)$/);
+        return m ? 'abs((' + m[1] + ') - (' + m[2] + ')) <= (' + m[3] + ')' : src;
+    }
+
+    var COMPARE = { equal: 1, unequal: 1, larger: 1, smaller: 1, largerEq: 1, smallerEq: 1 };
+
     // Поля строки таблицы поверх общей области видимости
     function Overlay(parent, values) { this.p = parent; this.v = values; }
     Overlay.prototype.get = function (k) { return Object.prototype.hasOwnProperty.call(this.v, k) ? this.v[k] : this.p.get(k); };
@@ -905,6 +927,151 @@
 
         var stack = [];
 
+        // Типы собираем заранее, поэтому объявлять их можно в любом месте вкладки
+        var typeLines = {};
+        calque.types = {};
+        (function collectTypes() {
+            var raw = calque.raw.split('\n');
+            for (var i = 0; i < raw.length; i++) {
+                var bare = splitComment(raw[i]).code.trim();
+                var m = bare.match(TYPE_DEF_RE);
+                if (!m) continue;
+                var indent = indentOf(raw[i]);
+                var T = { name: m[1], parent: m[2] || null, line: i, fields: [], defaults: [], formulas: [], checks: [], errors: [] };
+                typeLines[i] = { def: T };
+                for (var j = i + 1; j < raw.length; j++) {
+                    if (!raw[j].trim() || indentOf(raw[j]) <= indent) break;
+                    typeLines[j] = { body: T };
+                    var b = splitComment(raw[j]).code.trim();
+                    if (!b) continue;
+                    var fm, cm, dm, rm;
+                    try {
+                        if ((fm = b.match(new RegExp('^_(_?)(' + NAME + ')\\s*=\\s*(.+?)\\s*(\\(%\\))?$', 'u')))) {
+                            T.formulas.push({ name: fm[2], node: math.parse(fm[3]), rows: fm[1] === '_', pct: !!fm[4] });
+                        } else if ((cm = b.match(CHECK_RE))) {
+                            T.checks.push({ code: cm[1].trim(), node: math.parse(checkSource(cm[1])) });
+                        } else if ((dm = b.match(new RegExp('^(' + NAME + ')\\s*(:?=)\\s*(.+)$', 'u')))) {
+                            T.defaults.push({ name: dm[1], node: math.parse(dm[3]), nosum: dm[2] === ':=' });
+                        } else if ((rm = b.match(new RegExp('^(' + NAME + ')\\s*(?:\\[(.+)\\])?$', 'u')))) {
+                            T.fields.push({ name: rm[1], unit: rm[2] ? rm[2].trim() : null });
+                        } else {
+                            typeLines[j].error = 'Строка типа: поле, «поле [единица]», «поле = значение», «_формула = …» или «? проверка»';
+                        }
+                    } catch (e) {
+                        typeLines[j].error = e.message || e.toString();
+                    }
+                }
+                calque.types[T.name] = T;
+            }
+        })();
+
+        // Тип вместе с родительскими: свои поля, значения и формулы важнее родительских
+        function resolveType(name, seen) {
+            var T = calque.types[name];
+            if (!T) return null;
+            seen = seen || {};
+            if (seen[name]) return T;
+            seen[name] = true;
+            var base = T.parent ? resolveType(T.parent, seen) : null;
+            if (!base) return T;
+            function merge(a, b) {
+                var names = {};
+                b.forEach(function (x) { names[x.name] = true; });
+                return a.filter(function (x) { return !names[x.name]; }).concat(b);
+            }
+            return {
+                name: T.name,
+                fields: merge(base.fields, T.fields),
+                defaults: merge(base.defaults, T.defaults),
+                formulas: merge(base.formulas, T.formulas),
+                checks: base.checks.concat(T.checks)
+            };
+        }
+
+        // Совпадает ли размерность значения с единицей поля
+        function unitProblem(value, unit) {
+            var expected;
+            try { expected = math.evaluate('1 ' + unit); } catch (e) { return 'неизвестная единица [' + unit + ']'; }
+            if (!expected || !expected.isUnit) return 'неизвестная единица [' + unit + ']';
+            if (!value || !value.isUnit || !value.equalBase(expected)) return 'ожидались ' + unit;
+            return null;
+        }
+
+        function evalCheck(node, values) {
+            var sc = new Overlay(scope, values);
+            var res = calque.transform(node).compile().evaluate(sc);
+            if (typeof res !== 'boolean') throw new Error('Проверка должна быть условием, например «? вес > 0»');
+            var detail = '';
+            if (!res && node.isOperatorNode && COMPARE[node.fn]) {
+                var left = node.args[0];
+                try { detail = left.toString() + ' = ' + formatValue(tidy(calque.transform(left).compile().evaluate(sc))); } catch (e) { /* нет */ }
+            }
+            return { pass: res, detail: detail };
+        }
+
+        // Значения типа, которых нет в группе, и формулы типа
+        function applyTypeStart(g) {
+            if (!g.typeName) return;
+            var T = resolveType(g.typeName);
+            g.type = T;
+            if (!T) { g.typeErrors.push('Нет типа «@' + g.typeName + '»'); return; }
+            T.defaults.forEach(function (d) {
+                if (Object.prototype.hasOwnProperty.call(g.named, d.name)) return;
+                try {
+                    var v = tidy(calque.transform(d.node).compile().evaluate(new Overlay(scope, Object.assign({}, g.named))));
+                    g.named[d.name] = v;
+                    var n = calque.tree.add(g.path.concat([d.name]), g.line);
+                    scope.set(n.key, v);
+                    if (!d.nosum) g.leaves.push({ fieldName: d.name, result: v, virtual: true });
+                } catch (e) {
+                    g.typeErrors.push(d.name + ': ' + (e.message || e));
+                }
+            });
+            T.formulas.forEach(function (f) {
+                if (g.own[f.name]) return;
+                g.formulas.push({ name: f.name, node: f.node, line: { virtual: true }, rows: f.rows });
+                if (f.pct) calque.suffix[f.name] = '%';
+            });
+        }
+
+        // Обязательные поля, единицы и проверки — когда всё посчитано
+        function applyTypeEnd(g) {
+            var values = Object.assign({}, g.named, g.fields || {});
+            if (g.computed) Object.assign(values, g.computed);
+            if (g.type) {
+                g.type.fields.forEach(function (f) {
+                    if (!Object.prototype.hasOwnProperty.call(values, f.name)) {
+                        g.typeErrors.push('нет поля «' + f.name + '»');
+                        return;
+                    }
+                    if (!f.unit) return;
+                    var problem = unitProblem(values[f.name], f.unit);
+                    if (!problem) return;
+                    var at = g.leaves.find(function (l) { return l.fieldName === f.name && !l.virtual; });
+                    if (at) at.typeError = f.name + ': ' + problem;
+                    else g.typeErrors.push(f.name + ': ' + problem);
+                });
+                g.line.checks = g.type.checks.map(function (c) {
+                    try {
+                        var r = evalCheck(c.node, Object.assign({}, values));
+                        return { code: c.code, pass: r.pass, detail: r.detail };
+                    } catch (e) {
+                        return { code: c.code, pass: false, detail: e.message || String(e) };
+                    }
+                });
+            }
+            // Проверки, записанные прямо в группе
+            g.checkLines.forEach(function (l) {
+                try {
+                    var r = evalCheck(l.parsed, Object.assign({}, values));
+                    l.check = r;
+                } catch (e) {
+                    l.error = e.message || e.toString();
+                }
+            });
+            if (g.typeErrors.length) g.line.typeError = g.typeErrors.join('; ');
+        }
+
         function setGroupValue(g, value) {
             scope.set(g.name, value);
             scope.set(g.node.key, value);
@@ -942,6 +1109,7 @@
         function closeGroup(g) {
             var line = g.line;
             line.closed = true;
+            applyTypeStart(g);
 
             if (g.formulas.length && !g.groups.length) {
                 // Формулы строки: считаются по её собственным значениям
@@ -1057,7 +1225,7 @@
                     });
                 });
                 g.leaves.forEach(function (l) { if (l.fieldName) l.pctBase = fields[l.fieldName]; });
-            } else if (g.formulas.length) {
+            } else if (g.formulas.length || (g.typeName && !g.groups.length)) {
                 // Запись: поля и формулы, складывать их между собой бессмысленно
                 line.record = true;
                 line.result = undefined;
@@ -1078,6 +1246,7 @@
             }
 
             line.groupError = g.error;
+            applyTypeEnd(g);
 
         }
 
@@ -1114,14 +1283,42 @@
             var bare = splitComment(code).code;
             var trimmed = bare.trim();
 
-            if (trimmed.slice(-1) === ':' && trimmed.length > 1) {
-                line.summing = trimmed.slice(0, -1).trim();
+            // Объявление типа и его строки не считаются
+            if (typeLines[index]) {
+                line.typeDef = true;
+                if (typeLines[index].error) line.error = typeLines[index].error;
+                return;
+            }
+
+            var th = trimmed.match(TYPED_HEADER_RE);
+            if (th || (trimmed.slice(-1) === ':' && trimmed.length > 1)) {
+                line.summing = th ? th[1].trim() : trimmed.slice(0, -1).trim();
                 line.children = [];
                 var path = (parent ? parent.path : []).concat([line.summing]);
                 var node = calque.tree.add(path, line);
-                var g = { line: line, indent: line.indent, name: line.summing, path: path, node: node, leaves: [], groups: [], named: {}, formulas: [], own: {}, inherits: [], error: null };
+                var g = {
+                    line: line, indent: line.indent, name: line.summing, path: path, node: node,
+                    leaves: [], groups: [], named: {}, formulas: [], own: {}, inherits: [], checkLines: [], typeErrors: [], error: null,
+                    typeName: th && !th[3] ? th[2] : (parent && parent.rowType ? parent.rowType : null),
+                    rowType: th && th[3] ? th[2] : null
+                };
                 if (parent) parent.groups.push(g);
                 stack.push(g);
+                return;
+            }
+
+            // «? условие» — проверка: в группе считается при её закрытии, вне группы — сразу
+            var ck = bare.match(CHECK_RE);
+            if (ck) {
+                try {
+                    line.parsed = math.parse(checkSource(ck[1]));
+                    line.isCheck = true;
+                    if (parent) parent.checkLines.push(line);
+                    else line.check = evalCheck(line.parsed, {});
+                } catch (e) {
+                    line.error = e.message || e.toString();
+                }
+                stack.forEach(function (g) { g.line.children.push(line); });
                 return;
             }
 
@@ -1225,6 +1422,20 @@
 
     Calque.prototype.describeLine = function (line) {
         var type, data = '';
+
+        // Проверка «? условие»
+        if (line.isCheck && !line.error) {
+            if (!line.check) return { type: 'empty', prefix: ' ', data: '' };
+            return line.check.pass
+                ? { type: 'pass', prefix: ' ', data: '✓' }
+                : { type: 'fail', prefix: ' ', data: '✗' + (line.check.detail ? ' ' + line.check.detail : '') };
+        }
+        if (line.typeDef && !line.error) return { type: 'empty', prefix: ' ', data: '' };
+
+        // Ошибка типа: нет поля, не та единица
+        if (line.typeError && !line.error && !line.selected) {
+            return { type: 'error', prefix: ' // ', data: line.typeError };
+        }
         var error = line.error || line.rowError || (line.summing && !line.record ? line.groupError : null);
 
         if (error) {
@@ -1289,6 +1500,17 @@
             else { type = 'percent'; data = percent; prefix = ' · '; }
         }
 
+        if (line.checks && line.checks.length && type !== 'error') {
+            var failed = line.checks.filter(function (c) { return !c.pass; });
+            var mark = failed.length
+                ? failed.map(function (c) { return '✗ ' + c.code + (c.detail ? ' (' + c.detail + ')' : ''); }).join(' · ')
+                : '✓';
+            if (data) data += ' · ' + mark;
+            else { data = mark; prefix = ' '; }
+            if (failed.length) type = 'fail';
+            else if (type === 'empty') type = 'pass';
+        }
+
         return { type: type, prefix: prefix, data: data.replace(/\n/g, '\\n') };
     };
 
@@ -1304,7 +1526,7 @@
         if (!isFinite(common)) common = 0;
         var rows = lines.map(function (line) {
             var d = calque.describeLine(line);
-            var show = d.type === 'result' || d.type === 'percent';
+            var show = d.type === 'result' || d.type === 'percent' || d.type === 'pass' || d.type === 'fail';
             return { code: line.code.substring(common).replace(/\s+$/, ''), tail: show ? (d.prefix.trim() ? d.prefix.trim() + ' ' : '') + d.data : '' };
         });
         var width = 0;

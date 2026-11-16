@@ -87,6 +87,16 @@ body {
     color: #9bb8d3;
 }
 
+.cm-hint-pass {
+    color: #2e9d5b;
+}
+
+.cm-hint-fail {
+    color: #d33;
+}
+
+.tok-type { color: #0f8a7e; font-weight: 600; }
+
 .cm-hint-block {
     padding-bottom: 2px;
 }
@@ -402,6 +412,8 @@ body {
     .tok-formula { color: #b597e0; }
     .tok-nosum, .tok-operator { color: #d9a45b; }
     .tok-number { color: #7fb0e6; }
+    .tok-type { color: #4fc7b9; }
+    .cm-hint-pass { color: #5fc98a; }
 
     .calque-editor .cm-tooltip {
         background: #2a2a2a;

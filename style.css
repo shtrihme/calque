@@ -334,6 +334,18 @@ body {
     background: #f2f2f2;
 }
 
+.calque-menu-sep {
+    height: 1px;
+    margin: 4px 8px;
+    background: #e6e6e6;
+}
+
+.calque-editor .cm-lineNumbers .cm-gutterElement {
+    min-width: 2ch;
+    padding: 0 4px 0 8px;
+    color: #c4c4c4;
+}
+
 .calque-tabs .tab-add {
     flex: 0 0 auto;
     min-width: 44px;
@@ -419,6 +431,10 @@ body {
 
     .calque-menu button {
         color: #eee;
+    }
+
+    .calque-menu-sep {
+        background: #444;
     }
 
     .calque-menu button:active, .calque-menu button:hover {

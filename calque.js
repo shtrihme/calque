@@ -280,7 +280,11 @@
             provide: function (f) { return CM.EditorView.decorations.from(f); }
         });
 
+        calque.gutterSlot = new CM.Compartment();
+        calque.settings = { lineNumbers: !!options.lineNumbers, autoFormat: !!options.autoFormat };
+
         calque.extensions = [
+            calque.gutterSlot.of(calque.settings.lineNumbers ? CM.lineNumbers() : []),
             calque.resultsField,
             CM.history(),
             CM.drawSelection(),
@@ -319,6 +323,7 @@
                 icons: false
             }),
             CM.keymap.of(calque.keys().concat(CM.closeBracketsKeymap, CM.searchKeymap, CM.foldKeymap, CM.historyKeymap, CM.defaultKeymap)),
+            CM.EditorView.updateListener.of(function (u) { calque.autoFormatOnLeave(u); }),
             CM.EditorView.updateListener.of(function (u) {
                 if (!u.docChanged) return;
                 var text = u.state.doc.toString();
@@ -341,6 +346,56 @@
     // Новый текст с чистой историей отмены — для переключения вкладок
     Calque.prototype.setText = function (text) {
         this.view.setState(CM.EditorState.create({ doc: text, extensions: this.extensions }));
+    };
+
+    Calque.prototype.setLineNumbers = function (on) {
+        this.settings.lineNumbers = !!on;
+        this.view.dispatch({ effects: this.gutterSlot.reconfigure(on ? CM.lineNumbers() : []) });
+    };
+
+    Calque.prototype.setAutoFormat = function (on) {
+        this.settings.autoFormat = !!on;
+        this.lastLine = null;
+    };
+
+    Calque.prototype.formatAll = function () {
+        var state = this.view.state;
+        var text = state.doc.toString();
+        var formatted = formatText(text);
+        if (formatted === text) { this.toast('Уже отформатировано'); return; }
+        var head = state.doc.lineAt(state.selection.main.head).number;
+        var doc = CM.EditorState.create({ doc: formatted }).doc;
+        var pos = doc.line(Math.min(head, doc.lines)).to;
+        this.view.dispatch({ changes: { from: 0, to: text.length, insert: formatted }, selection: { anchor: pos }, userEvent: 'format' });
+        this.toast('Отформатировано');
+    };
+
+    // Строку форматируем, когда с неё ушли: пока её набирают, не трогаем
+    Calque.prototype.autoFormatOnLeave = function (u) {
+        var calque = this;
+        var state = u.state;
+        var current = state.doc.lineAt(state.selection.main.head);
+        if (!calque.settings.autoFormat || u.transactions.some(function (tr) { return tr.isUserEvent('format'); })) {
+            calque.lastLine = current.from;
+            return;
+        }
+        if (calque.lastLine !== null && calque.lastLine !== undefined && (u.docChanged || u.selectionSet)) {
+            var from = u.changes.mapPos(calque.lastLine, -1);
+            if (from <= state.doc.length) {
+                var left = state.doc.lineAt(from);
+                if (left.number !== current.number) {
+                    var formatted = formatLine(left.text);
+                    if (formatted !== left.text) {
+                        Promise.resolve().then(function () {
+                            var now = calque.view.state.doc;
+                            if (left.to > now.length || now.sliceString(left.from, left.to) !== left.text) return;
+                            calque.view.dispatch({ changes: { from: left.from, to: left.to, insert: formatted }, userEvent: 'format' });
+                        });
+                    }
+                }
+            }
+        }
+        calque.lastLine = current.from;
     };
 
     Calque.prototype.getText = function () {
@@ -396,6 +451,82 @@
         });
         return b.finish();
     };
+
+    // ---------- Автоформат ----------
+
+    var BINARY = { '+': 1, '-': 1, '*': 1, '/': 1, '=': 1, ':=': 1, '==': 1, '!=': 1, '<=': 1, '>=': 1, '<': 1, '>': 1 };
+    var OPENERS = { '(': 1, '[': 1 };
+    var CLOSERS = { ')': 1, ']': 1 };
+
+    // Разбиваем выражение на части и запоминаем, был ли перед частью пробел
+    function tokenize(src) {
+        var tokens = [], i = 0, space = false, m;
+        while (i < src.length) {
+            var rest = src.slice(i);
+            if ((m = rest.match(/^\s+/))) { space = true; i += m[0].length; continue; }
+            if ((m = rest.match(/^("([^"\\]|\\.)*"?|'([^'\\]|\\.)*'?)/))) {}
+            else if ((m = rest.match(/^\d+(\.\d+)?(e[+-]?\d+)?(?![\p{L}_])/iu))) {}
+            else if ((m = rest.match(/^\d+(\.\d+)?/))) {}
+            else if ((m = rest.match(/^[\p{L}_][\p{L}\p{N}_]*(\.[\p{L}_][\p{L}\p{N}_]*)*/u))) {}
+            else if ((m = rest.match(/^(:=|==|!=|<=|>=)/))) {}
+            else m = [rest[0]];
+            tokens.push({ t: m[0], space: space });
+            space = false;
+            i += m[0].length;
+        }
+        return tokens;
+    }
+
+    function formatExpr(src) {
+        var tokens = tokenize(src);
+        var out = '';
+        tokens.forEach(function (tok, k) {
+            var prev = tokens[k - 1];
+            var t = tok.t;
+            if (!prev) { out += t; return; }
+            var p = prev.t;
+            var unary = (t === '-' || t === '+') && (k === 0 || BINARY[p] || OPENERS[p] || p === ',' || p === ';' || p === '^' || p === ':');
+            var prevUnary = (p === '-' || p === '+') && prev.unary;
+            tok.unary = unary;
+            var sp;
+            if (t === ',' || t === ';') sp = false;
+            else if (p === ',' || p === ';') sp = true;
+            else if (t === '^' || p === '^') sp = false;
+            else if (CLOSERS[t] || OPENERS[p]) sp = false;
+            else if (prevUnary) sp = false;
+            else if (t === ':' && k === tokens.length - 1) sp = false;
+            else if (BINARY[t] && !unary) sp = true;
+            else if (BINARY[p] && !prevUnary) sp = true;
+            else if (unary) sp = tok.space || !!BINARY[p] || p === ',';
+            else sp = tok.space;
+            out += (sp ? ' ' : '') + t;
+        });
+        return out;
+    }
+
+    function formatLine(code) {
+        if (!code.trim()) return '';
+        var lead = code.match(/^[ \t]*/)[0];
+        var indent = new Array(Math.floor(lead.replace(/\t/g, '  ').length / 2) + 1).join('  ');
+        var parts = splitComment(code.slice(lead.length));
+        var body = formatExpr(parts.code.trim());
+        var comment = parts.comment ? parts.comment.replace(/^#\s*/, '# ').replace(/\s+$/, '') : '';
+        if (comment === '# ') comment = '#';
+        return indent + body + (comment ? (body ? ' ' : '') + comment : '');
+    }
+
+    function formatText(text) {
+        var lines = text.split('\n').map(formatLine);
+        var out = [];
+        lines.forEach(function (l) {
+            if (l === '' && out.length && out[out.length - 1] === '') return;
+            out.push(l);
+        });
+        return out.join('\n');
+    }
+
+    Calque.formatLine = formatLine;
+    Calque.formatText = formatText;
 
     // ---------- Ошибки в тексте ----------
 
@@ -561,6 +692,7 @@
                 }
             },
             { key: 'Mod-d', run: function () { calque.duplicateSelection(); return true; } },
+            { key: 'Shift-Alt-f', run: function () { calque.formatAll(); return true; } },
             { key: 'ArrowUp', run: function () { return calque.stepSelected(1, false); }, shift: function () { return calque.stepSelected(1, true); } },
             { key: 'ArrowDown', run: function () { return calque.stepSelected(-1, false); }, shift: function () { return calque.stepSelected(-1, true); } }
         ];

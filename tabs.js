@@ -10,6 +10,16 @@
         return null;
     }
 
+    var SETTINGS = 'calque_settings';
+
+    function loadSettings() {
+        try { return JSON.parse(localStorage.getItem(SETTINGS)) || {}; } catch (e) { return {}; }
+    }
+
+    function saveSettings(settings) {
+        try { localStorage.setItem(SETTINGS, JSON.stringify(settings)); } catch (e) { /* ничего */ }
+    }
+
     function newId() {
         return Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
     }
@@ -240,6 +250,22 @@
             menu.appendChild(b);
         }
 
+        function toggle(label, key, apply) {
+            var on = !!tabs.calque.settings[key];
+            item((on ? '✓ ' : '\u2003') + label, function () {
+                apply(!on);
+                saveSettings(tabs.calque.settings);
+                tabs.calque.toast(label + (on ? ': выключено' : ': включено'));
+            });
+        }
+
+        toggle('Номера строк', 'lineNumbers', function (v) { tabs.calque.setLineNumbers(v); });
+        toggle('Автоформат', 'autoFormat', function (v) { tabs.calque.setAutoFormat(v); });
+        item('\u2003Отформатировать всё', function () { tabs.calque.formatAll(); });
+        var sep = document.createElement('div');
+        sep.className = 'calque-menu-sep';
+        menu.appendChild(sep);
+
         item('Сохранить все вкладки', function () { tabs.exportAll(); });
         item('Открыть файл…', function () {
             var input = document.createElement('input');
@@ -284,7 +310,10 @@
         data.active = doc.id;
 
         var tabs;
+        var settings = loadSettings();
         var calque = new Calque(options.editor, {
+            lineNumbers: settings.lineNumbers,
+            autoFormat: settings.autoFormat,
             toolbar: options.toolbar,
             storageKey: null,
             text: doc.text,

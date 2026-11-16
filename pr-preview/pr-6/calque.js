@@ -360,12 +360,15 @@
         var b = new CM.RangeSetBuilder();
         calque.lines.forEach(function (line) {
             if (isHidden(line.positionEnd)) return;
-            // Направляющие отступов
-            for (var i = 0; i < line.indent; i++) {
-                var at = line.positionStart + i * 2;
-                if (line.code.substr(i * 2, 2) === '  ') b.add(at, at + 2, CM.Decoration.mark({ class: 'cm-guide' }));
-            }
 
+            // Перенесённые строки начинаются под текстом, а не с края
+            if (line.indent > 0) {
+                var w = line.indent * 2;
+                b.add(line.positionStart, line.positionStart, CM.Decoration.line({
+                    class: 'cm-indented',
+                    attributes: { style: 'padding-left: calc(' + w + 'ch + 2px); text-indent: -' + w + 'ch; background-size: ' + w + 'ch 100%;' }
+                }));
+            }
             var d = calque.describeLine(line);
             if (!d.data || (d.type !== 'result' && d.type !== 'percent' && d.type !== 'error')) return;
 

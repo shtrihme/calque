@@ -61,9 +61,12 @@ body {
     margin-left: 6px;
 }
 
-/* Направляющая у каждого уровня отступа */
-.calque-editor .cm-guide {
-    box-shadow: inset 1px 0 0 #e6e6e6;
+/* Направляющая у каждого уровня отступа, на всю высоту перенесённой строки */
+.calque-editor .cm-indented {
+    --guide: #e6e6e6;
+    background-image: repeating-linear-gradient(to right, var(--guide) 0 1px, transparent 1px 2ch);
+    background-repeat: no-repeat;
+    background-position: 2px 0;
 }
 
 /* Результаты */
@@ -300,8 +303,8 @@ body {
         background: #2c2c2c;
     }
 
-    .calque-editor .cm-guide {
-        box-shadow: inset 1px 0 0 #3a3a3a;
+    .calque-editor .cm-indented {
+        --guide: #3a3a3a;
     }
 
     .calque-editor .cm-cursor {

@@ -75,6 +75,20 @@
         if (text === '') this.calque.focus();
     };
 
+    // Справка — отдельная вкладка. Открываем её в исходном виде, даже если её правили
+    Tabs.prototype.openHelp = function () {
+        var doc = this.data.docs.find(function (d) { return d.help; });
+        if (doc) {
+            doc.text = this.helpText;
+            this.open(doc.id);
+        } else {
+            doc = { id: newId(), text: this.helpText, help: true };
+            this.data.docs.push(doc);
+            this.open(doc.id);
+        }
+        window.scrollTo(0, 0);
+    };
+
     Tabs.prototype.close = function (id) {
         var docs = this.data.docs;
         var i = docs.findIndex(function (d) { return d.id === id; });
@@ -266,8 +280,8 @@
         sep.className = 'calque-menu-sep';
         menu.appendChild(sep);
 
-        item('Сохранить все вкладки', function () { tabs.exportAll(); });
-        item('Открыть файл…', function () {
+        item('\u2003Сохранить все вкладки', function () { tabs.exportAll(); });
+        item('\u2003Открыть файл…', function () {
             var input = document.createElement('input');
             input.type = 'file';
             input.multiple = true;
@@ -275,6 +289,11 @@
             input.onchange = function () { if (input.files.length) tabs.importFiles(input.files); };
             input.click();
         });
+
+        var sep2 = document.createElement('div');
+        sep2.className = 'calque-menu-sep';
+        menu.appendChild(sep2);
+        item('\u2003Справка', function () { tabs.openHelp(); });
 
         document.body.appendChild(menu);
         var r = anchor.getBoundingClientRect();
@@ -302,7 +321,7 @@
         if (!data) {
             var old = null;
             try { old = localStorage.getItem('input'); } catch (e) { /* ничего */ }
-            var first = { id: newId(), text: old !== null ? old : (options.example || '') };
+            var first = old !== null ? { id: newId(), text: old } : { id: newId(), text: options.help || '', help: true };
             data = { docs: [first], active: first.id };
         }
 
@@ -321,6 +340,7 @@
         });
 
         tabs = new Tabs(options.bar, calque, data);
+        tabs.helpText = options.help || '';
         tabs.save();
         window.calque = calque;
         window.calqueTabs = tabs;

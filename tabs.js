@@ -10,6 +10,16 @@
         return null;
     }
 
+    var SETTINGS = 'calque_settings';
+
+    function loadSettings() {
+        try { return JSON.parse(localStorage.getItem(SETTINGS)) || {}; } catch (e) { return {}; }
+    }
+
+    function saveSettings(settings) {
+        try { localStorage.setItem(SETTINGS, JSON.stringify(settings)); } catch (e) { /* ничего */ }
+    }
+
     function newId() {
         return Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
     }
@@ -63,6 +73,20 @@
         this.data.docs.push(doc);
         this.open(doc.id);
         if (text === '') this.calque.focus();
+    };
+
+    // Справка — отдельная вкладка. Открываем её в исходном виде, даже если её правили
+    Tabs.prototype.openHelp = function () {
+        var doc = this.data.docs.find(function (d) { return d.help; });
+        if (doc) {
+            doc.text = this.helpText;
+            this.open(doc.id);
+        } else {
+            doc = { id: newId(), text: this.helpText, help: true };
+            this.data.docs.push(doc);
+            this.open(doc.id);
+        }
+        window.scrollTo(0, 0);
     };
 
     Tabs.prototype.close = function (id) {
@@ -240,8 +264,24 @@
             menu.appendChild(b);
         }
 
-        item('Сохранить все вкладки', function () { tabs.exportAll(); });
-        item('Открыть файл…', function () {
+        function toggle(label, key, apply) {
+            var on = !!tabs.calque.settings[key];
+            item((on ? '✓ ' : '\u2003') + label, function () {
+                apply(!on);
+                saveSettings(tabs.calque.settings);
+                tabs.calque.toast(label + (on ? ': выключено' : ': включено'));
+            });
+        }
+
+        toggle('Номера строк', 'lineNumbers', function (v) { tabs.calque.setLineNumbers(v); });
+        toggle('Автоформат', 'autoFormat', function (v) { tabs.calque.setAutoFormat(v); });
+        item('\u2003Отформатировать всё', function () { tabs.calque.formatAll(); });
+        var sep = document.createElement('div');
+        sep.className = 'calque-menu-sep';
+        menu.appendChild(sep);
+
+        item('\u2003Сохранить все вкладки', function () { tabs.exportAll(); });
+        item('\u2003Открыть файл…', function () {
             var input = document.createElement('input');
             input.type = 'file';
             input.multiple = true;
@@ -249,6 +289,11 @@
             input.onchange = function () { if (input.files.length) tabs.importFiles(input.files); };
             input.click();
         });
+
+        var sep2 = document.createElement('div');
+        sep2.className = 'calque-menu-sep';
+        menu.appendChild(sep2);
+        item('\u2003Справка', function () { tabs.openHelp(); });
 
         document.body.appendChild(menu);
         var r = anchor.getBoundingClientRect();
@@ -276,7 +321,7 @@
         if (!data) {
             var old = null;
             try { old = localStorage.getItem('input'); } catch (e) { /* ничего */ }
-            var first = { id: newId(), text: old !== null ? old : (options.example || '') };
+            var first = old !== null ? { id: newId(), text: old } : { id: newId(), text: options.help || '', help: true };
             data = { docs: [first], active: first.id };
         }
 
@@ -284,7 +329,10 @@
         data.active = doc.id;
 
         var tabs;
+        var settings = loadSettings();
         var calque = new Calque(options.editor, {
+            lineNumbers: settings.lineNumbers,
+            autoFormat: settings.autoFormat,
             toolbar: options.toolbar,
             storageKey: null,
             text: doc.text,
@@ -292,6 +340,7 @@
         });
 
         tabs = new Tabs(options.bar, calque, data);
+        tabs.helpText = options.help || '';
         tabs.save();
         window.calque = calque;
         window.calqueTabs = tabs;

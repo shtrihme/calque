@@ -99,6 +99,54 @@ body {
 .tok-operator { color: #a86b1d; }
 .tok-number { color: #1d5fa8; }
 
+/* Значение имени */
+.cm-tooltip .cm-info {
+    padding: 6px 10px;
+    font-family: 'Menlo', 'Monaco', 'Consolas', courier, monospace;
+    font-size: 14px;
+    max-width: 320px;
+    white-space: normal;
+}
+
+.cm-info-where {
+    color: #999;
+    font-size: 12px;
+    margin-top: 2px;
+}
+
+.calque-editor .cm-tooltip {
+    border: 1px solid #ddd;
+    border-radius: 8px;
+    background: #fff;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.08);
+}
+
+/* Совпадения и скобки */
+.calque-editor .cm-selectionMatch {
+    background: #fff2b3;
+}
+
+.calque-editor .cm-matchingBracket {
+    background: #e3eefc;
+    outline: none;
+}
+
+/* Поиск */
+.calque-editor .cm-panels {
+    position: fixed !important;
+    top: calc(env(safe-area-inset-top, 0px) + 44px) !important;
+    left: 0;
+    right: 0;
+    z-index: 9;
+    background: #fafafa;
+    border-bottom: 1px solid #e3e3e3;
+    font-family: -apple-system, 'Segoe UI', Roboto, sans-serif;
+}
+
+.calque-editor .cm-search input, .calque-editor .cm-search button {
+    font-size: 15px;
+}
+
 /* Подсказки у курсора */
 .cm-tooltip.cm-tooltip-autocomplete {
     border: 1px solid #ddd;
@@ -133,16 +181,16 @@ body {
 
 .calque-toolbar .buttons {
     display: flex;
-    gap: 6px;
+    gap: 4px;
     flex-wrap: nowrap;
     overflow-x: auto;
 }
 
 .calque-toolbar button {
     flex: 1 1 0;
-    min-width: 36px;
+    min-width: 0;
     height: 40px;
-    padding: 0 6px;
+    padding: 0 2px;
     border: 1px solid #d6d6d6;
     border-radius: 8px;
     background: #fff;
@@ -159,7 +207,18 @@ body {
 }
 
 .calque-toolbar button.gap {
-    margin-left: 6px;
+    margin-left: 3px;
+}
+
+@media (max-width: 380px) {
+    .calque-toolbar button {
+        font-size: 13px;
+    }
+}
+
+.calque-toolbar button:disabled {
+    opacity: 0.35;
+    cursor: default;
 }
 
 .calque-toast {
@@ -286,6 +345,18 @@ body {
     background: #f2f2f2;
 }
 
+.calque-menu-sep {
+    height: 1px;
+    margin: 4px 8px;
+    background: #e6e6e6;
+}
+
+.calque-editor .cm-lineNumbers .cm-gutterElement {
+    min-width: 2ch;
+    padding: 0 4px 0 8px;
+    color: #c4c4c4;
+}
+
 .calque-tabs .tab-add {
     flex: 0 0 auto;
     min-width: 44px;
@@ -332,6 +403,25 @@ body {
     .tok-nosum, .tok-operator { color: #d9a45b; }
     .tok-number { color: #7fb0e6; }
 
+    .calque-editor .cm-tooltip {
+        background: #2a2a2a;
+        border-color: #444;
+    }
+
+    .calque-editor .cm-selectionMatch {
+        background: #4d4520;
+    }
+
+    .calque-editor .cm-matchingBracket {
+        background: #2d3e55;
+    }
+
+    .calque-editor .cm-panels {
+        background: #262626;
+        border-bottom-color: #424242;
+        color: #eee;
+    }
+
     .cm-tooltip.cm-tooltip-autocomplete {
         background: #2a2a2a;
         border-color: #444;
@@ -352,6 +442,10 @@ body {
 
     .calque-menu button {
         color: #eee;
+    }
+
+    .calque-menu-sep {
+        background: #444;
     }
 
     .calque-menu button:active, .calque-menu button:hover {

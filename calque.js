@@ -610,13 +610,31 @@
         calque.outputEl.innerHTML = html;
     };
 
-    // Текст с результатами — для пересылки
-    Calque.prototype.toText = function () {
+    // Строки, которые задевает выделение. Без выделения — все строки
+    Calque.prototype.selectedLines = function () {
         var calque = this;
-        var rows = calque.lines.map(function (line) {
+        var s = calque.inputEl.selectionStart, e = calque.inputEl.selectionEnd;
+        if (s === e) return calque.lines;
+        return calque.lines.filter(function (line) {
+            if (line.code.length === 0) return line.positionStart >= s && line.positionStart < e;
+            return Math.min(e, line.positionEnd) - Math.max(s, line.positionStart) > 0;
+        });
+    };
+
+    // Текст с результатами — для пересылки
+    Calque.prototype.toText = function (lines) {
+        var calque = this;
+        lines = lines || calque.lines;
+        // Убираем общий отступ, если скопирована часть группы
+        var common = Infinity;
+        lines.forEach(function (line) {
+            if (line.code.trim()) common = Math.min(common, line.code.match(/^ */)[0].length);
+        });
+        if (!isFinite(common)) common = 0;
+        var rows = lines.map(function (line) {
             var d = calque.describeLine(line);
             var show = d.type === 'result' || d.type === 'percent';
-            return { code: line.code.replace(/\s+$/, ''), tail: show ? (d.type === 'percent' ? '· ' + d.data : '= ' + d.data) : '' };
+            return { code: line.code.substring(common).replace(/\s+$/, ''), tail: show ? (d.type === 'percent' ? '· ' + d.data : '= ' + d.data) : '' };
         });
         var width = 0;
         rows.forEach(function (r) { if (r.tail) width = Math.max(width, r.code.length); });
@@ -792,8 +810,12 @@
         button('+10', 'Увеличить число на 10 шагов', function () { calque.stepAtCaret(1, true); });
         button('⇤', 'Убрать отступ', function () { calque.removeIndent(); }, 'gap');
         button('⇥', 'Добавить отступ', function () { calque.addIndent(); });
-        button('⧉', 'Скопировать текст с итогами', function () {
-            copyText(calque.toText()).then(function () { calque.toast('Скопировано с итогами'); });
+        button('⧉', 'Скопировать выделенное с итогами, без выделения — весь расчёт', function () {
+            var lines = calque.selectedLines();
+            var all = lines === calque.lines;
+            copyText(calque.toText(lines)).then(function () {
+                calque.toast(all ? 'Скопирован весь расчёт' : 'Скопировано строк: ' + lines.length);
+            });
         }, 'gap');
         button('🔗', 'Скопировать ссылку на этот расчёт', function () {
             calque.shareLink().then(function (url) {

@@ -43,7 +43,7 @@
         if (!doc || doc.text === text) return;
         doc.text = text;
         this.save();
-        var el = this.bar.querySelector('[data-id="' + doc.id + '"] .tab-title');
+        var el = this.bar.querySelector('.tab[data-id="' + doc.id + '"] .tab-title');
         if (el) el.textContent = titleOf(text);
     };
 
@@ -84,8 +84,10 @@
 
     Tabs.prototype.render = function () {
         var tabs = this;
-        var bar = tabs.bar;
-        bar.innerHTML = '';
+        tabs.bar.innerHTML = '';
+        var bar = document.createElement('div');
+        bar.className = 'tab-list';
+        tabs.bar.appendChild(bar);
         var activeId = tabs.active().id;
 
         tabs.data.docs.forEach(function (doc) {
@@ -121,10 +123,150 @@
         plus.title = 'Новый расчёт';
         plus.onmousedown = function (e) { e.preventDefault(); };
         plus.onclick = function () { tabs.add(''); };
-        bar.appendChild(plus);
+        tabs.bar.appendChild(plus);
+
+        var more = document.createElement('button');
+        more.type = 'button';
+        more.className = 'tab-menu';
+        more.textContent = '⋯';
+        more.title = 'Сохранить или открыть файл';
+        more.onmousedown = function (e) { e.preventDefault(); };
+        more.onclick = function (e) { e.stopPropagation(); tabs.toggleMenu(more); };
+        tabs.bar.appendChild(more);
 
         var active = bar.querySelector('.tab.active');
         if (active && active.scrollIntoView) active.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    };
+
+    // ---------- Файлы ----------
+
+    function pipeBytes(bytes, stream) {
+        return new Response(new Blob([bytes]).stream().pipeThrough(stream)).arrayBuffer()
+            .then(function (b) { return new Uint8Array(b); });
+    }
+
+    function today() {
+        var d = new Date();
+        function p(n) { return (n < 10 ? '0' : '') + n; }
+        return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate());
+    }
+
+    function download(bytes, name, type) {
+        var url = URL.createObjectURL(new Blob([bytes], { type: type }));
+        var a = document.createElement('a');
+        a.href = url;
+        a.download = name;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        setTimeout(function () { URL.revokeObjectURL(url); }, 10000);
+    }
+
+    Tabs.prototype.exportAll = function () {
+        var tabs = this;
+        var json = JSON.stringify({
+            app: 'calque',
+            version: 1,
+            exported: new Date().toISOString(),
+            docs: tabs.data.docs.map(function (d) { return { title: titleOf(d.text), text: d.text }; })
+        }, null, 1);
+        var bytes = new TextEncoder().encode(json);
+        if (typeof CompressionStream === 'undefined') {
+            download(bytes, 'calque-' + today() + '.json', 'application/json');
+            tabs.calque.toast('Сохранено без сжатия: браузер не умеет gzip');
+            return;
+        }
+        pipeBytes(bytes, new CompressionStream('gzip')).then(function (gz) {
+            download(gz, 'calque-' + today() + '.json.gz', 'application/gzip');
+            tabs.calque.toast('Сохранено вкладок: ' + tabs.data.docs.length);
+        });
+    };
+
+    // Читаем .json.gz, .json или .txt: сначала проверяем подпись gzip, потом JSON
+    function readFile(file) {
+        return file.arrayBuffer().then(function (buf) {
+            var bytes = new Uint8Array(buf);
+            if (bytes[0] === 0x1f && bytes[1] === 0x8b) {
+                return pipeBytes(bytes, new DecompressionStream('gzip'));
+            }
+            return bytes;
+        }).then(function (bytes) {
+            var text = new TextDecoder().decode(bytes);
+            try {
+                var data = JSON.parse(text);
+                if (data && Array.isArray(data.docs)) {
+                    return data.docs.map(function (d) { return String(d.text || ''); });
+                }
+            } catch (e) { /* не JSON — значит, обычный текст */ }
+            return [text.replace(/\r\n/g, '\n')];
+        });
+    }
+
+    Tabs.prototype.importFiles = function (files) {
+        var tabs = this;
+        Promise.all(Array.prototype.map.call(files, readFile)).then(function (lists) {
+            var added = 0, skipped = 0, lastId = null;
+            lists.forEach(function (texts) {
+                texts.forEach(function (text) {
+                    if (tabs.data.docs.some(function (d) { return d.text === text; })) { skipped++; return; }
+                    var doc = { id: newId(), text: text };
+                    tabs.data.docs.push(doc);
+                    lastId = doc.id;
+                    added++;
+                });
+            });
+            if (lastId) tabs.open(lastId);
+            var msg = 'Открыто вкладок: ' + added;
+            if (skipped) msg += ', уже были: ' + skipped;
+            tabs.calque.toast(msg);
+        }).catch(function () {
+            tabs.calque.toast('Не получилось прочитать файл');
+        });
+    };
+
+    Tabs.prototype.toggleMenu = function (anchor) {
+        var tabs = this;
+        if (tabs.menu) { tabs.closeMenu(); return; }
+
+        var menu = document.createElement('div');
+        menu.className = 'calque-menu';
+
+        function item(label, action) {
+            var b = document.createElement('button');
+            b.type = 'button';
+            b.textContent = label;
+            b.onmousedown = function (e) { e.preventDefault(); };
+            b.onclick = function () { tabs.closeMenu(); action(); };
+            menu.appendChild(b);
+        }
+
+        item('Сохранить все вкладки', function () { tabs.exportAll(); });
+        item('Открыть файл…', function () {
+            var input = document.createElement('input');
+            input.type = 'file';
+            input.multiple = true;
+            input.accept = '.gz,.json,.txt,application/gzip,application/json,text/plain';
+            input.onchange = function () { if (input.files.length) tabs.importFiles(input.files); };
+            input.click();
+        });
+
+        document.body.appendChild(menu);
+        var r = anchor.getBoundingClientRect();
+        menu.style.top = (r.bottom + 4) + 'px';
+        menu.style.right = Math.max(8, window.innerWidth - r.right) + 'px';
+        tabs.menu = menu;
+
+        setTimeout(function () {
+            tabs.outside = function (e) { if (!menu.contains(e.target)) tabs.closeMenu(); };
+            document.addEventListener('click', tabs.outside);
+        });
+    };
+
+    Tabs.prototype.closeMenu = function () {
+        if (!this.menu) return;
+        this.menu.remove();
+        this.menu = null;
+        document.removeEventListener('click', this.outside);
     };
 
     // Запуск страницы: вкладки, перенос старого документа, открытие ссылки

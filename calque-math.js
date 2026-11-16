@@ -8,6 +8,30 @@
             return isAlpha(c, cPrev, cNext) || /[Ѐ-ӿ]/.test(c);
         };
 
+        // Килокалории и русские обозначения единиц
+        var isValidAlpha = math.Unit.isValidAlpha;
+        math.Unit.isValidAlpha = function (c) { return isValidAlpha(c) || /[\u0400-\u04FF]/.test(c); };
+        math.createUnit({
+            cal: { definition: '4.184 J', aliases: ['calorie', 'calories'] },
+            kcal: { definition: '4184 J' },
+            'кал': '1 cal',
+            'ккал': '1 kcal',
+            'мг': '1 mg',
+            'г': '1 g',
+            'кг': '1 kg',
+            'т': '1 tonne',
+            'мл': '1 mL',
+            'л': '1 L',
+            'мм': '1 mm',
+            'см': '1 cm',
+            'м': '1 m',
+            'км': '1 km',
+            'с': '1 s',
+            'мин': '1 minute',
+            'ч': '1 hour',
+            'сут': '1 day'
+        }, { override: true });
+
         function toNum(v) {
             if (typeof v === 'number') return v;
             if (v && v.isUnit) return v.toNumber();

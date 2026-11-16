@@ -322,21 +322,235 @@
         });
     };
 
+    // «имя := выражение» — значение, которое не попадает в суммы групп
+    var NOSUM_RE = /^(\s*)([\p{L}_][\p{L}\p{N}_]*)\s*:=(.*)$/u;
+
+    // «_имя = выражение» внутри группы — формула. Считается, когда группа закрыта,
+    // поэтому порядок строк не важен. «(%)» в конце дописывает к значению знак %
+    var FORMULA_RE = /^\s*_([\p{L}][\p{L}\p{N}_]*)\s*=\s*(.+?)\s*(\(%\))?\s*$/u;
+
+    // Поля строки таблицы поверх общей области видимости
+    function Overlay(parent, values) { this.p = parent; this.v = values; }
+    Overlay.prototype.get = function (k) { return Object.prototype.hasOwnProperty.call(this.v, k) ? this.v[k] : this.p.get(k); };
+    Overlay.prototype.has = function (k) { return Object.prototype.hasOwnProperty.call(this.v, k) || this.p.has(k); };
+    Overlay.prototype.set = function (k, v) { this.v[k] = v; return this; };
+    Overlay.prototype.keys = function () { return Object.keys(this.v).concat(Array.from(this.p.keys()))[Symbol.iterator](); };
+    Overlay.prototype.delete = function (k) { return delete this.v[k]; };
+
+    function addValues(a, b) {
+        return a === undefined ? b : math.add(a, b);
+    }
+
+    // math.js не сокращает одинаковые единицы: 100 г × 15 ккал/(100 г) хранится как г·ккал/г.
+    // Сокращаем сами, иначе дальше деление даёт км²/сут²
+    function tidy(v) {
+        if (!v || !v.isUnit || !v.units || v.units.length < 2) return v;
+        var merged = [], index = {};
+        v.units.forEach(function (u) {
+            var key = u.unit.name + '|' + u.prefix.name;
+            if (key in index) merged[index[key]].power += u.power;
+            else { index[key] = merged.length; merged.push({ unit: u.unit, prefix: u.prefix, power: u.power }); }
+        });
+        merged = merged.filter(function (u) { return Math.abs(u.power) > 1e-12; });
+        if (merged.length === v.units.length) return v;
+        if (!merged.length) return v.value;
+        var r = v.clone();
+        r.units = merged;
+        return r;
+    }
+
+    // Делим строку на код и комментарий в конце: «вес = 100 # граммы»
+    function splitComment(code) {
+        var quote = null;
+        for (var i = 0; i < code.length; i++) {
+            var ch = code[i];
+            if (quote) { if (ch === quote) quote = null; continue; }
+            if (ch === '"' || ch === "'") quote = ch;
+            else if (ch === '#') return { code: code.slice(0, i).replace(/\s+$/, ''), comment: code.slice(i) };
+        }
+        return { code: code, comment: '' };
+    }
+
+    // Имена переменных в выражении, без функций, единиц и констант
+    function symbolsOf(node) {
+        var names = {};
+        node.traverse(function (n, path, parent) {
+            if (!n.isSymbolNode) return;
+            if (parent && parent.isFunctionNode && path === 'fn') return;
+            names[n.name] = true;
+        });
+        return Object.keys(names);
+    }
+
     Calque.prototype.recalc = function () {
         var calque = this;
 
         calque.lines = [];
         calque.tree = new Tree();
+        calque.suffix = {};
         var scope = calque.scope = new Map();
         scope.set('last', null);
 
         var stack = [];
 
+        function setGroupValue(g, value) {
+            scope.set(g.name, value);
+            scope.set(g.node.key, value);
+        }
+
+        // Поля группы: её именованные значения и формулы или итоги, если она сама таблица
+        function fieldsOf(g) {
+            if (g.fields) return g.fields;
+            var f = {};
+            g.leaves.forEach(function (l) { if (l.fieldName) f[l.fieldName] = l.result; });
+            return f;
+        }
+
+        // Считаем формулы в области values. Несколько проходов — формулы могут ссылаться друг на друга
+        function evaluateFormulas(formulas, values, onResult, onError) {
+            var pending = formulas.slice(), errors = {};
+            for (var pass = 0; pass <= formulas.length && pending.length; pass++) {
+                var next = [];
+                pending.forEach(function (f) {
+                    try {
+                        var v = tidy(calque.transform(f.node).compile().evaluate(new Overlay(scope, values)));
+                        values[f.name] = v;
+                        onResult(f, v);
+                    } catch (e) {
+                        errors[f.name] = e.message || e.toString();
+                        next.push(f);
+                    }
+                });
+                if (next.length === pending.length) break;
+                pending = next;
+            }
+            pending.forEach(function (f) { onError(f, errors[f.name]); });
+        }
+
         function closeGroup(g) {
-            g.line.closed = true;
-            g.line.result = g.sum;
-            scope.set(g.name, g.sum);
-            scope.set(g.node.key, g.sum);
+            var line = g.line;
+            line.closed = true;
+
+            if (g.formulas.length && !g.groups.length) {
+                // Формулы строки: считаются по её собственным значениям
+                evaluateFormulas(g.formulas, Object.assign({}, g.named), function (f, v) {
+                    f.line.result = v;
+                    f.line.fieldName = f.name;
+                    g.named[f.name] = v;
+                    g.leaves.push(f.line);
+                    var n = calque.tree.add(g.path.concat([f.name]), f.line);
+                    scope.set(n.key, v);
+                }, function (f, err) {
+                    f.line.error = err;
+                });
+            } else if (g.formulas.length) {
+                // Формулы таблицы: считаются для каждой строки
+                g.groups.forEach(function (c) {
+                    var values = Object.assign({}, c.named, fieldsOf(c));
+                    c.computed = {};
+                    evaluateFormulas(g.formulas, values, function (f, v) {
+                        c.computed[f.name] = v;
+                        c.named[f.name] = v;
+                        var n = calque.tree.add(c.path.concat([f.name]), c.line);
+                        scope.set(n.key, v);
+                    }, function (f, err) {
+                        c.line.rowError = f.name + ': ' + err;
+                    });
+                    if (c.fields) Object.assign(c.fields, c.computed);
+                });
+            }
+
+            function rowFields(c) {
+                var f = Object.assign({}, fieldsOf(c));
+                if (c.computed) Object.assign(f, c.computed);
+                return f;
+            }
+
+            // Таблица: у соседних подгрупп повторяются имена полей или у неё есть формулы
+            var count = {};
+            g.groups.forEach(function (c) {
+                Object.keys(rowFields(c)).forEach(function (k) { count[k] = (count[k] || 0) + 1; });
+            });
+            var tableFormulas = g.groups.length > 0 && g.formulas.length > 0;
+            var isTable = tableFormulas || Object.keys(count).some(function (k) { return count[k] >= 2; });
+
+            if (isTable) {
+                var fields = {};
+                var add = function (name, value) {
+                    try { fields[name] = addValues(fields[name], value); }
+                    catch (e) { g.error = 'Поле «' + name + '»: ' + (e.message || e); }
+                };
+                g.groups.forEach(function (c) {
+                    var cf = rowFields(c);
+                    Object.keys(cf).forEach(function (k) { add(k, cf[k]); });
+                });
+                g.leaves.forEach(function (l) { if (l.fieldName) add(l.fieldName, l.result); });
+
+                // Итог формулы — по итогам полей, если все её поля есть в итогах.
+                // Так отношения вроде ккал/вес дают среднее, а не сумму долей
+                if (tableFormulas) {
+                    var rowNames = {};
+                    g.groups.forEach(function (c) { Object.keys(c.named).forEach(function (k) { rowNames[k] = true; }); });
+                    g.formulas.forEach(function (f) {
+                        var ok = symbolsOf(f.node).every(function (name) {
+                            if (Object.prototype.hasOwnProperty.call(fields, name)) return true;
+                            return !rowNames[name];
+                        });
+                        if (!ok) return;
+                        try {
+                            fields[f.name] = tidy(calque.transform(f.node).compile().evaluate(new Overlay(scope, Object.assign({}, fields))));
+                        } catch (e) { /* остаётся сумма по строкам */ }
+                    });
+                    g.formulas.forEach(function (f) {
+                        f.line.result = fields[f.name];
+                        f.line.isTotal = true;
+                    });
+                }
+
+                g.fields = fields;
+                line.fields = fields;
+                line.result = undefined;
+                setGroupValue(g, Object.assign({}, fields));
+
+                Object.keys(fields).forEach(function (k) {
+                    var n = calque.tree.add(g.path.concat([k]), line);
+                    scope.set(n.key, fields[k]);
+                });
+
+                // Подгруппы становятся строками таблицы
+                g.groups.forEach(function (c) {
+                    if (c.fields) return;
+                    c.line.record = true;
+                    c.line.result = undefined;
+                    c.error = null;
+                    setGroupValue(c, rowFields(c));
+                    c.leaves.forEach(function (l) { if (l.fieldName) l.pctBase = fields[l.fieldName]; });
+                    c.line.rowFields = c.computed && Object.keys(c.computed).length ? c.computed : null;
+                    c.line.rowBases = fields;
+                });
+                g.leaves.forEach(function (l) { if (l.fieldName) l.pctBase = fields[l.fieldName]; });
+            } else if (g.formulas.length) {
+                // Запись: поля и формулы, складывать их между собой бессмысленно
+                line.record = true;
+                line.result = undefined;
+                setGroupValue(g, fieldsOf(g));
+                var own = {};
+                g.formulas.forEach(function (f) { if (f.line.result !== undefined) own[f.name] = f.line.result; });
+                line.rowFields = own;
+            } else {
+                var sum = 0;
+                var items = g.leaves.slice();
+                g.groups.forEach(function (c) { if (!c.fields) items.push(c.line); });
+                items.forEach(function (l) {
+                    try { sum = math.add(sum, l.result); }
+                    catch (e) { g.error = e.message || e.toString(); }
+                });
+                line.result = sum;
+                setGroupValue(g, sum);
+                items.forEach(function (l) { l.pctBase = sum; });
+            }
+
+            line.groupError = g.error;
         }
 
         function closeUntil(indent) {
@@ -355,7 +569,9 @@
                 indent: 0,
                 summing: null,
                 closed: false,
-                parentGroup: null
+                noSum: false,
+                fieldName: null,
+                pctBase: undefined
             };
 
             position += code.length + 1;
@@ -366,50 +582,72 @@
 
             closeUntil(line.indent);
             var parent = stack.length ? stack[stack.length - 1] : null;
-            line.parentGroup = parent ? parent.line : null;
 
-            var trimmed = code.trim();
+            var bare = splitComment(code).code;
+            var trimmed = bare.trim();
 
-            if (trimmed.slice(-1) === ':' && trimmed.indexOf('#') < 0) {
+            if (trimmed.slice(-1) === ':' && trimmed.length > 1) {
                 line.summing = trimmed.slice(0, -1).trim();
-                line.result = 0;
                 line.children = [];
                 var path = (parent ? parent.path : []).concat([line.summing]);
                 var node = calque.tree.add(path, line);
-                stack.push({ line: line, indent: line.indent, name: line.summing, path: path, node: node, sum: 0 });
+                var g = { line: line, indent: line.indent, name: line.summing, path: path, node: node, leaves: [], groups: [], named: {}, formulas: [], error: null };
+                if (parent) parent.groups.push(g);
+                stack.push(g);
                 return;
             }
 
+            stack.forEach(function (g) { g.line.children.push(line); });
+
+            // Формула группы: запоминаем, посчитаем при закрытии группы
+            var fm = parent && bare.match(FORMULA_RE);
+            if (fm) {
+                try {
+                    var key = 'formula:' + fm[2];
+                    if (!calque.cache[key]) calque.cache[key] = { parsed: math.parse(fm[2]) };
+                    line.formula = fm[1];
+                    line.parsed = calque.cache[key].parsed;
+                    if (fm[3]) calque.suffix[fm[1]] = '%';
+                    parent.formulas.push({ name: fm[1], node: line.parsed, line: line });
+                } catch (e) {
+                    line.error = e.message || e.toString();
+                }
+                return;
+            }
+
+            var source = bare;
+            var m = bare.match(NOSUM_RE);
+            if (m) {
+                source = m[1] + m[2] + ' =' + m[3];
+                line.noSum = true;
+            }
+
             try {
-                var cached = calque.cache[code];
+                var cached = calque.cache[source];
                 if (!cached) {
-                    cached = { parsed: math.parse(code) };
-                    calque.cache[code] = cached;
+                    cached = { parsed: math.parse(source) };
+                    calque.cache[source] = cached;
                 }
                 line.parsed = cached.parsed;
-                line.result = calque.transform(cached.parsed).compile().evaluate(scope);
+                line.result = tidy(calque.transform(cached.parsed).compile().evaluate(scope));
             } catch (e) {
                 line.error = e.message || e.toString();
             }
 
             if (line.result === undefined) return;
 
+            var named = line.parsed && line.parsed.isAssignmentNode && line.parsed.object.isSymbolNode;
+
             // Значение внутри группы доступно и по полному пути
-            if (parent && line.parsed && line.parsed.isAssignmentNode && line.parsed.object.isSymbolNode) {
-                var leafPath = parent.path.concat([line.parsed.object.name]);
-                var leaf = calque.tree.add(leafPath, line);
+            if (parent && named) {
+                var leaf = calque.tree.add(parent.path.concat([line.parsed.object.name]), line);
                 scope.set(leaf.key, line.result);
+                parent.named[line.parsed.object.name] = line.result;
             }
 
-            if (typeof line.result !== 'function') {
-                stack.forEach(function (g) {
-                    g.line.children.push(line);
-                    try {
-                        g.sum = math.add(g.sum, line.result);
-                    } catch (e) {
-                        g.line.error = e.message || e.toString();
-                    }
-                });
+            if (parent && typeof line.result !== 'function' && !line.noSum) {
+                parent.leaves.push(line);
+                if (named) line.fieldName = line.parsed.object.name;
             }
 
             scope.set('last', line.result);
@@ -548,39 +786,85 @@
     };
 
     // Что показывать справа от строки: тип, префикс и текст
+    // Число с единицей вроде «100 г» или «15 ккал / (100 г)» — без переменных
+    function isPlainQuantity(node) {
+        var plain = true;
+        node.traverse(function (n) {
+            if (n.isSymbolNode && !(n.name in math) && !math.Unit.isValuelessUnit(n.name)) plain = false;
+            if (n.isFunctionNode || n.isAccessorNode) plain = false;
+        });
+        return plain;
+    }
+
+    // Доля a от b: числа или величины одной размерности
+    function ratio(a, b) {
+        try {
+            if (a === undefined || b === undefined || typeof a === 'function') return null;
+            var r = math.divide(a, b);
+            return isNumeric(r) ? r : null;
+        } catch (e) {
+            return null;
+        }
+    }
+
     Calque.prototype.describeLine = function (line) {
         var type, data = '';
+        var error = line.error || line.rowError || (line.summing && !line.record ? line.groupError : null);
 
-        if (line.error) {
+        if (error) {
             if (line.selected) type = 'empty';
             else if (line.summing && line.children.find(function (l) { return l.error; })) type = 'empty';
             else type = 'error';
         } else if (line.summing) {
-            type = 'result';
+            type = line.record && !line.rowFields ? 'empty' : 'result';
         } else if (line.result === undefined || typeof line.result === 'function') {
             type = 'empty';
+        } else if (line.formula) {
+            type = 'result';
         } else if (line.parsed.isFunctionAssignmentNode) {
             type = 'empty';
         } else if (line.parsed.isConstantNode) {
             type = 'empty';
         } else if (line.parsed.isAssignmentNode && line.parsed.value.isConstantNode) {
             type = 'empty';
+        } else if (line.parsed.isAssignmentNode && isPlainQuantity(line.parsed.value)) {
+            type = 'empty';
         } else {
             type = 'result';
         }
 
-        if (type === 'result') data = formatValue(line.result);
-        else if (type === 'error') data = line.error;
+        if (type === 'result') {
+            var calque = this;
+            var fmt = function (k, v) {
+                if (calque.suffix[k] === '%' && isNumeric(v)) return formatPercent(v);
+                return formatValue(v) + (calque.suffix[k] || '');
+            };
+            if (line.rowFields) {
+                data = Object.keys(line.rowFields).map(function (k) {
+                    var v = k + ' ' + fmt(k, line.rowFields[k]);
+                    var r = line.rowBases ? ratio(line.rowFields[k], line.rowBases[k]) : null;
+                    return r !== null && isFinite(r) ? v + ' (' + formatPercent(r * 100) + ')' : v;
+                }).join(' · ');
+            } else if (line.fields) {
+                data = Object.keys(line.fields).map(function (k) {
+                    return k + ' ' + fmt(k, line.fields[k]);
+                }).join(' · ');
+            } else {
+                data = line.formula ? fmt(line.formula, line.result) : formatValue(line.result);
+            }
+        } else if (type === 'error') {
+            data = error;
+        }
 
-        // Доля от родительской группы
+        // Доля в группе: в обычной группе — от её итога, в таблице — от итога столбца
         var percent = '';
-        var parent = line.parentGroup;
-        if (type !== 'error' && parent && isNumeric(line.result) && isNumeric(parent.result) && parent.result !== 0 && !line.parsed?.isFunctionAssignmentNode) {
-            percent = formatPercent(line.result / parent.result * 100);
+        if (type !== 'error' && !line.noSum && !line.isTotal && line.pctBase !== undefined) {
+            var r = ratio(line.result, line.pctBase);
+            if (r !== null && isFinite(r) && line.pctBase !== 0) percent = formatPercent(r * 100);
         }
 
         var prefix = ' ';
-        if (type === 'result') prefix += '= ';
+        if (type === 'result') prefix += line.fields || line.rowFields ? '' : '= ';
         else if (type === 'error') prefix += '// ';
 
         if (percent) {
@@ -645,7 +929,7 @@
         var rows = lines.map(function (line) {
             var d = calque.describeLine(line);
             var show = d.type === 'result' || d.type === 'percent';
-            return { code: line.code.substring(common).replace(/\s+$/, ''), tail: show ? (d.type === 'percent' ? '· ' + d.data : '= ' + d.data) : '' };
+            return { code: line.code.substring(common).replace(/\s+$/, ''), tail: show ? (d.prefix.trim() ? d.prefix.trim() + ' ' : '') + d.data : '' };
         });
         var width = 0;
         rows.forEach(function (r) { if (r.tail) width = Math.max(width, r.code.length); });

@@ -168,6 +168,7 @@
         calque.outputEl = outputEl;
         calque.parentEl = inputEl.parentNode;
         calque.storageKey = options.storageKey === undefined ? 'input' : options.storageKey;
+        calque.onChange = options.onChange || null;
 
         calque.raw = null;
         calque.lines = [];
@@ -262,6 +263,15 @@
         calque.outputEl.scrollTop = calque.inputEl.scrollTop;
     }
 
+    // Подменить весь текст, например при переключении вкладки
+    Calque.prototype.setText = function (text) {
+        this.inputEl.value = text;
+        this.inputEl.setSelectionRange(0, 0);
+        this.suggestionsHidden = true;
+        this.input();
+        this.inputEl.style.height = Math.max(this.outputEl.clientHeight, this.parentEl.clientHeight) + 'px';
+    };
+
     Calque.prototype.input = function () {
         var calque = this;
 
@@ -276,6 +286,7 @@
             calque.repaint();
             calque.updateSuggestions();
 
+            if (changed && calque.onChange) calque.onChange(calque.raw);
             if (changed && calque.storageKey) {
                 try { localStorage.setItem(calque.storageKey, calque.raw); } catch (e) { /* приватный режим */ }
             }

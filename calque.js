@@ -855,9 +855,13 @@
     var NAME = '[\\p{L}_][\\p{L}\\p{N}_]*';
 
     // Проверка: «A == B ± C» превращаем в «abs(A - B) <= C»
+    // «± 1%» — допуск в процентах от правой части
     function checkSource(src) {
         var m = src.match(/^(.*?)==(.*)±(.*)$/);
-        return m ? 'abs((' + m[1] + ') - (' + m[2] + ')) <= (' + m[3] + ')' : src;
+        if (!m) return src;
+        var tol = m[3].trim();
+        if (/%$/.test(tol)) return 'abs((' + m[1] + ') - (' + m[2] + ')) <= abs(' + m[2] + ') * (' + tol + ')';
+        return 'abs((' + m[1] + ') - (' + m[2] + ')) <= (' + tol + ')';
     }
 
     var COMPARE = { equal: 1, unequal: 1, larger: 1, smaller: 1, largerEq: 1, smallerEq: 1 };
@@ -1454,8 +1458,9 @@
             type = 'empty';
         } else if (line.parsed.isAssignmentNode && line.parsed.value.isConstantNode) {
             type = 'empty';
-        } else if (line.parsed.isAssignmentNode && isPlainQuantity(line.parsed.value) &&
-            formatValue(line.result).replace(/[\s\u00a0]/g, '') === line.parsed.value.toString().replace(/\s/g, '')) {
+        } else if (line.parsed.isAssignmentNode && isPlainQuantity(line.parsed.value) && (
+            line.noSum || /%\s*$/.test(line.parsed.value.toString()) ||
+            formatValue(line.result).replace(/[\s\u00a0]/g, '') === line.parsed.value.toString().replace(/\s/g, ''))) {
             type = 'empty';
         } else {
             type = 'result';

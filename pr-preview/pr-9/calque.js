@@ -1032,6 +1032,7 @@
                     c.line.record = true;
                     c.line.result = undefined;
                     c.error = null;
+                    c.line.groupError = null;
                     setGroupValue(c, rowFields(c));
                     c.leaves.forEach(function (l) { if (l.fieldName) l.pctBase = fields[l.fieldName]; });
                     c.line.rowFields = c.computed && Object.keys(c.computed).length ? c.computed : null;
@@ -1047,13 +1048,14 @@
                 g.formulas.forEach(function (f) { if (f.line.result !== undefined) own[f.name] = f.line.result; });
                 line.rowFields = own;
             } else {
-                var sum = 0;
+                var sum;
                 var items = g.leaves.slice();
                 g.groups.forEach(function (c) { if (!c.fields) items.push(c.line); });
                 items.forEach(function (l) {
-                    try { sum = math.add(sum, l.result); }
+                    try { sum = addValues(sum, l.result); }
                     catch (e) { g.error = e.message || e.toString(); }
                 });
+                if (sum === undefined) sum = 0;
                 line.result = sum;
                 setGroupValue(g, sum);
                 items.forEach(function (l) { l.pctBase = sum; });
@@ -1209,7 +1211,8 @@
             type = 'empty';
         } else if (line.parsed.isAssignmentNode && line.parsed.value.isConstantNode) {
             type = 'empty';
-        } else if (line.parsed.isAssignmentNode && isPlainQuantity(line.parsed.value)) {
+        } else if (line.parsed.isAssignmentNode && isPlainQuantity(line.parsed.value) &&
+            formatValue(line.result).replace(/[\s\u00a0]/g, '') === line.parsed.value.toString().replace(/\s/g, '')) {
             type = 'empty';
         } else {
             type = 'result';

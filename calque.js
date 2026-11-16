@@ -835,7 +835,9 @@
 
     // «_имя = выражение» внутри группы — формула. Считается, когда группа закрыта,
     // поэтому порядок строк не важен. «(%)» в конце дописывает к значению знак %
-    var FORMULA_RE = /^\s*_([\p{L}][\p{L}\p{N}_]*)\s*=\s*(.+?)\s*(\(%\))?\s*$/u;
+    var FORMULA_RE = /^\s*(__?)([\p{L}][\p{L}\p{N}_]*)\s*=\s*(.+?)\s*(\(%\))?\s*$/u;
+    // «_имя» без выражения в строке таблицы — показать здесь формулу группы
+    var INHERIT_RE = /^\s*__?([\p{L}][\p{L}\p{N}_]*)\s*$/u;
 
     // Поля строки таблицы поверх общей области видимости
     function Overlay(parent, values) { this.p = parent; this.v = values; }
@@ -957,7 +959,8 @@
                 g.groups.forEach(function (c) {
                     var values = Object.assign({}, c.named, fieldsOf(c));
                     c.computed = {};
-                    evaluateFormulas(g.formulas, values, function (f, v) {
+                    var applicable = g.formulas.filter(function (f) { return !c.own[f.name]; });
+                    evaluateFormulas(applicable, values, function (f, v) {
                         c.computed[f.name] = v;
                         c.named[f.name] = v;
                         var n = calque.tree.add(c.path.concat([f.name]), c.line);
@@ -1035,8 +1038,22 @@
                     c.line.groupError = null;
                     setGroupValue(c, rowFields(c));
                     c.leaves.forEach(function (l) { if (l.fieldName) l.pctBase = fields[l.fieldName]; });
-                    c.line.rowFields = c.computed && Object.keys(c.computed).length ? c.computed : null;
+                    var shown = {};
+                    g.formulas.forEach(function (f) {
+                        if (f.rows && c.computed && c.computed[f.name] !== undefined) shown[f.name] = c.computed[f.name];
+                    });
+                    c.line.rowFields = Object.keys(shown).length ? shown : null;
                     c.line.rowBases = fields;
+
+                    // «_имя» в строке: значение формулы группы для этой строки
+                    c.inherits.forEach(function (l) {
+                        if (c.computed && c.computed[l.formula] !== undefined) {
+                            l.result = c.computed[l.formula];
+                            l.pctBase = fields[l.formula];
+                        } else if (!c.own[l.formula]) {
+                            l.error = 'У группы «' + g.name + '» нет формулы «_' + l.formula + '»';
+                        }
+                    });
                 });
                 g.leaves.forEach(function (l) { if (l.fieldName) l.pctBase = fields[l.fieldName]; });
             } else if (g.formulas.length) {
@@ -1044,9 +1061,7 @@
                 line.record = true;
                 line.result = undefined;
                 setGroupValue(g, fieldsOf(g));
-                var own = {};
-                g.formulas.forEach(function (f) { if (f.line.result !== undefined) own[f.name] = f.line.result; });
-                line.rowFields = own;
+                line.rowFields = null;
             } else {
                 var sum;
                 var items = g.leaves.slice();
@@ -1062,6 +1077,7 @@
             }
 
             line.groupError = g.error;
+
         }
 
         function closeUntil(indent) {
@@ -1102,7 +1118,7 @@
                 line.children = [];
                 var path = (parent ? parent.path : []).concat([line.summing]);
                 var node = calque.tree.add(path, line);
-                var g = { line: line, indent: line.indent, name: line.summing, path: path, node: node, leaves: [], groups: [], named: {}, formulas: [], error: null };
+                var g = { line: line, indent: line.indent, name: line.summing, path: path, node: node, leaves: [], groups: [], named: {}, formulas: [], own: {}, inherits: [], error: null };
                 if (parent) parent.groups.push(g);
                 stack.push(g);
                 return;
@@ -1114,15 +1130,23 @@
             var fm = parent && bare.match(FORMULA_RE);
             if (fm) {
                 try {
-                    var key = 'formula:' + fm[2];
-                    if (!calque.cache[key]) calque.cache[key] = { parsed: math.parse(fm[2]) };
-                    line.formula = fm[1];
+                    var key = 'formula:' + fm[3];
+                    if (!calque.cache[key]) calque.cache[key] = { parsed: math.parse(fm[3]) };
+                    line.formula = fm[2];
                     line.parsed = calque.cache[key].parsed;
-                    if (fm[3]) calque.suffix[fm[1]] = '%';
-                    parent.formulas.push({ name: fm[1], node: line.parsed, line: line });
+                    if (fm[4]) calque.suffix[fm[2]] = '%';
+                    parent.formulas.push({ name: fm[2], node: line.parsed, line: line, rows: fm[1] === '__' });
+                    parent.own[fm[2]] = true;
                 } catch (e) {
                     line.error = e.message || e.toString();
                 }
+                return;
+            }
+            var im = parent && bare.match(INHERIT_RE);
+            if (im) {
+                line.formula = im[1];
+                line.inherit = true;
+                parent.inherits.push(line);
                 return;
             }
 
@@ -1168,6 +1192,13 @@
 
         closeUntil(0);
         while (stack.length) closeGroup(stack.pop());
+
+        // «_имя», которому не нашлось формулы у родительской таблицы
+        calque.lines.forEach(function (l) {
+            if (l.inherit && l.result === undefined && !l.error) {
+                l.error = 'Формулы «_' + l.formula + '» нет у родительской группы';
+            }
+        });
     };
 
     // Число с единицей вроде «100 г» или «15 ккал / (100 г)» — без переменных

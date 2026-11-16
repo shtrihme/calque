@@ -55,14 +55,14 @@
         this.calque.setText(this.active().text);
         this.render();
         window.scrollTo(0, this.scroll[id] || 0);
-        this.calque.inputEl.focus({ preventScroll: true });
+        this.calque.focus();
     };
 
     Tabs.prototype.add = function (text) {
         var doc = { id: newId(), text: text };
         this.data.docs.push(doc);
         this.open(doc.id);
-        if (text === '') this.calque.inputEl.focus();
+        if (text === '') this.calque.focus();
     };
 
     Tabs.prototype.close = function (id) {
@@ -271,26 +271,25 @@
 
     // Запуск страницы: вкладки, перенос старого документа, открытие ссылки
     Tabs.start = function (options) {
-        var input = options.input;
         var data = load();
 
         if (!data) {
             var old = null;
             try { old = localStorage.getItem('input'); } catch (e) { /* ничего */ }
-            var first = { id: newId(), text: old !== null ? old : input.value };
+            var first = { id: newId(), text: old !== null ? old : (options.example || '') };
             data = { docs: [first], active: first.id };
         }
 
-        var tabs;
-        var calque = new Calque(input, options.output, {
-            toolbar: options.toolbar,
-            storageKey: null,
-            onChange: function (text) { if (tabs) tabs.onChange(text); }
-        });
-
         var doc = data.docs.find(function (d) { return d.id === data.active; }) || data.docs[0];
         data.active = doc.id;
-        calque.setText(doc.text);
+
+        var tabs;
+        var calque = new Calque(options.editor, {
+            toolbar: options.toolbar,
+            storageKey: null,
+            text: doc.text,
+            onChange: function (text) { if (tabs) tabs.onChange(text); }
+        });
 
         tabs = new Tabs(options.bar, calque, data);
         tabs.save();
@@ -316,7 +315,7 @@
         // Ссылку могут вставить в адресную строку уже открытой страницы
         window.addEventListener('hashchange', openHash);
 
-        input.focus({ preventScroll: true });
+        calque.focus();
         return tabs;
     };
 

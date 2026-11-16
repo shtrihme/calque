@@ -160,13 +160,99 @@
 
     // =====================================================
 
-    function Calque(inputEl, outputEl, options) {
+    // =====================================================
+    // Редактор на CodeMirror 6
+
+    var CM = window.CM;
+
+    function escapeHtml(s) {
+        return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    }
+
+    function isHeaderCode(code) {
+        var t = splitComment(code).code.trim();
+        return t.length > 1 && t.slice(-1) === ':';
+    }
+
+    function indentOf(code) {
+        return Math.floor(code.match(/^[ \t]*/)[0].replace(/\t/g, '  ').length / 2);
+    }
+
+    // Результат справа от строки или под ней
+    class HintWidget extends CM.WidgetType {
+        constructor(d, block, indent) {
+            super();
+            this.d = d;
+            this.block = block;
+            this.indent = indent;
+        }
+
+        eq(o) {
+            return o.block === this.block && o.indent === this.indent && o.d.type === this.d.type && o.d.data === this.d.data && o.d.prefix === this.d.prefix;
+        }
+
+        toDOM() {
+            var el = document.createElement(this.block ? 'div' : 'span');
+            el.className = 'cm-hint cm-hint-' + this.d.type + (this.block ? ' cm-hint-block' : '');
+            if (this.block) el.style.paddingLeft = 'calc(' + (this.indent * 2) + 'ch + 2px)';
+            var prefix = this.block ? this.d.prefix.replace(/^ /, '') : this.d.prefix;
+            el.innerHTML = '<span class="cm-hint-prefix">' + escapeHtml(prefix) + '</span>' + escapeHtml(this.d.data);
+            return el;
+        }
+
+        ignoreEvent() { return false; }
+    }
+
+    // Подсветка: группы, формулы, :=, числа, комментарии
+    var language = CM.StreamLanguage.define({
+        name: 'calque',
+        startState: function () { return { start: true }; },
+        token: function (stream, state) {
+            if (stream.sol()) state.start = true;
+            if (stream.eatSpace()) return null;
+            if (stream.peek() === '#') { stream.skipToEnd(); return 'comment'; }
+            if (state.start) {
+                state.start = false;
+                if (stream.match(/^[^:#=]+:(?=\s*(#.*)?$)/)) return 'heading';
+                if (stream.match(/^_[\p{L}][\p{L}\p{N}_]*/u)) return 'keyword';
+                if (stream.match(/^[\p{L}_][\p{L}\p{N}_]*(?=\s*:=)/u)) return 'atom';
+            }
+            if (stream.match(':=')) return 'operator';
+            if (stream.match(/^\d+(\.\d+)?(e[+-]?\d+)?/i)) return 'number';
+            if (stream.match(/^[\p{L}_][\p{L}\p{N}_]*/u)) return 'variableName';
+            stream.next();
+            return null;
+        }
+    });
+
+    var highlight = CM.HighlightStyle.define([
+        { tag: CM.tags.comment, class: 'tok-comment' },
+        { tag: CM.tags.heading, class: 'tok-heading' },
+        { tag: CM.tags.keyword, class: 'tok-formula' },
+        { tag: CM.tags.atom, class: 'tok-nosum' },
+        { tag: CM.tags.operator, class: 'tok-operator' },
+        { tag: CM.tags.number, class: 'tok-number' }
+    ]);
+
+    // Группа сворачивается до первой строки с тем же или меньшим отступом
+    var folding = CM.foldService.of(function (state, from) {
+        var line = state.doc.lineAt(from);
+        if (!isHeaderCode(line.text)) return null;
+        var indent = indentOf(line.text);
+        var end = line;
+        for (var n = line.number + 1; n <= state.doc.lines; n++) {
+            var next = state.doc.line(n);
+            if (!next.text.trim() || indentOf(next.text) <= indent) break;
+            end = next;
+        }
+        return end.number > line.number ? { from: line.to, to: end.to } : null;
+    });
+
+    function Calque(container, options) {
         var calque = this;
         options = options || {};
 
-        calque.inputEl = inputEl;
-        calque.outputEl = outputEl;
-        calque.parentEl = inputEl.parentNode;
+        calque.container = container;
         calque.storageKey = options.storageKey === undefined ? 'input' : options.storageKey;
         calque.onChange = options.onChange || null;
 
@@ -175,122 +261,255 @@
         calque.cache = {};
         calque.tree = new Tree();
         calque.scope = new Map();
+        calque.suffix = {};
 
-        calque.selection = '';
-        calque.selectionStart = 0;
-        calque.selectionEnd = 0;
+        var initial = options.text || '';
+        if (calque.storageKey) {
+            try {
+                var stored = localStorage.getItem(calque.storageKey);
+                if (stored !== null) initial = stored;
+            } catch (e) { /* приватный режим */ }
+        }
 
-        calque.suggestions = [];
-        calque.suggestionsHidden = false;
-
-        if (options.toolbar) calque.buildToolbar(options.toolbar);
-
-        var last = 0;
-        var handler = function () {
-            if (last === Date.now()) return;
-            else last = Date.now();
-
-            calque.input();
-            calque.inputEl.style.height = Math.max(calque.outputEl.clientHeight, calque.parentEl.clientHeight) + 'px';
-        };
-        calque.handler = handler;
-
-        handler();
-
-        calque.inputEl.oninput = function () {
-            calque.suggestionsHidden = false;
-            handler();
-        };
-
-        calque.inputEl.onmousedown = function () {
-            window.requestAnimationFrame(handler);
-        };
-
-        calque.inputEl.onkeydown = function (event) {
-            if (event.key === 'Escape') {
-                calque.suggestionsHidden = true;
-                calque.renderSuggestions();
-            }
-
-            if (event.key === 'Enter') {
-                var line = calque.lines.filter(function (line) { return line.selected; }).pop();
-
-                var insert = '\n';
-                if (line && line.summing) insert += '  ';
-                if (line) for (var i = 0; i < line.indent; i++) insert += '  ';
-
-                calque.replaceSelection(insert, false);
-                event.preventDefault();
-            }
-
-            if (event.metaKey || event.ctrlKey) {
-                if (event.key === 'd' || event.key === 'в') {
-                    calque.duplicateSelection();
-                    event.preventDefault();
-                }
-            }
-
-            if (event.key === 'ArrowUp' || event.key === 'ArrowDown') {
-                var selection = calque.raw.substring(calque.inputEl.selectionStart, calque.inputEl.selectionEnd);
-
-                if (selection.match(/^-?\d+(\.\d+)?$/)) {
-                    var dir = event.key === 'ArrowUp' ? 1 : -1;
-                    calque.replaceSelection(stepNumber(selection, dir, event.shiftKey));
-                    event.preventDefault();
-                }
-            }
-
-            if (event.key === 'Tab') {
-                if (!event.shiftKey && calque.suggestions.length && !calque.suggestionsHidden) {
-                    calque.applySuggestion(calque.suggestions[0]);
-                } else if (event.shiftKey) {
-                    calque.removeIndent();
-                } else {
-                    calque.addIndent();
-                }
-
-                event.preventDefault();
-            }
-
-            window.requestAnimationFrame(handler);
-        };
-
-        setTimeout(function fn() {
-            setTimeout(fn, 50);
-            handler();
+        calque.resultsField = CM.StateField.define({
+            create: function (state) { return calque.decorate(state); },
+            update: function (deco, tr) {
+                var folds = tr.effects.some(function (e) { return e.is(CM.foldEffect) || e.is(CM.unfoldEffect); });
+                return tr.docChanged || tr.selection || folds ? calque.decorate(tr.state) : deco;
+            },
+            provide: function (f) { return CM.EditorView.decorations.from(f); }
         });
 
-        calque.outputEl.scrollTop = calque.inputEl.scrollTop;
+        calque.extensions = [
+            calque.resultsField,
+            CM.history(),
+            CM.drawSelection(),
+            CM.highlightActiveLine(),
+            CM.EditorView.lineWrapping,
+            CM.indentUnit.of('  '),
+            language,
+            CM.syntaxHighlighting(highlight),
+            folding,
+            CM.codeFolding({ placeholderText: '…' }),
+            CM.foldGutter({
+                markerDOM: function (open) {
+                    var el = document.createElement('span');
+                    el.className = 'cm-fold-marker';
+                    el.textContent = open ? '▾' : '▸';
+                    return el;
+                }
+            }),
+            CM.autocompletion({
+                override: [function (ctx) { return calque.complete(ctx); }],
+                icons: false
+            }),
+            CM.keymap.of(calque.keys().concat(CM.foldKeymap, CM.historyKeymap, CM.defaultKeymap)),
+            CM.EditorView.updateListener.of(function (u) {
+                if (!u.docChanged) return;
+                var text = u.state.doc.toString();
+                if (calque.onChange) calque.onChange(text);
+                if (calque.storageKey) {
+                    try { localStorage.setItem(calque.storageKey, text); } catch (e) { /* приватный режим */ }
+                }
+            }),
+            CM.EditorView.contentAttributes.of({ autocapitalize: 'off', autocorrect: 'off', spellcheck: 'false' })
+        ];
+
+        calque.view = new CM.EditorView({
+            state: CM.EditorState.create({ doc: initial, extensions: calque.extensions }),
+            parent: container
+        });
+
+        if (options.toolbar) calque.buildToolbar(options.toolbar);
     }
 
-    // Подменить весь текст, например при переключении вкладки
+    // Новый текст с чистой историей отмены — для переключения вкладок
     Calque.prototype.setText = function (text) {
-        this.inputEl.value = text;
-        this.inputEl.setSelectionRange(0, 0);
-        this.suggestionsHidden = true;
-        this.input();
-        this.inputEl.style.height = Math.max(this.outputEl.clientHeight, this.parentEl.clientHeight) + 'px';
+        this.view.setState(CM.EditorState.create({ doc: text, extensions: this.extensions }));
     };
 
-    Calque.prototype.input = function () {
+    Calque.prototype.getText = function () {
+        return this.view.state.doc.toString();
+    };
+
+    Calque.prototype.focus = function () {
+        this.view.focus();
+    };
+
+    // Пересчёт и разметка результатов
+    Calque.prototype.decorate = function (state) {
         var calque = this;
-
-        var raw = calque.inputEl.value;
-        var selectionStart = calque.inputEl.selectionStart;
-        var selectionEnd = calque.inputEl.selectionEnd;
-        if (raw !== calque.raw || selectionStart !== calque.selectionStart || selectionEnd !== calque.selectionEnd) {
-            var changed = raw !== calque.raw;
-            calque.raw = raw;
-            if (changed) calque.recalc();
-            calque.readSelection();
-            calque.repaint();
-            calque.updateSuggestions();
-
-            if (changed && calque.onChange) calque.onChange(calque.raw);
-            if (changed && calque.storageKey) {
-                try { localStorage.setItem(calque.storageKey, calque.raw); } catch (e) { /* приватный режим */ }
-            }
+        var text = state.doc.toString();
+        if (text !== calque.raw) {
+            calque.raw = text;
+            calque.recalc();
         }
+
+        var sel = state.selection.main;
+        calque.lines.forEach(function (line) {
+            line.selected = line.positionEnd >= sel.from && line.positionStart <= sel.to;
+        });
+
+        // Результаты внутри свёрнутых групп не показываем
+        var hidden = [];
+        CM.foldedRanges(state).between(0, state.doc.length, function (from, to) { hidden.push([from, to]); });
+        function isHidden(pos) {
+            return hidden.some(function (r) { return pos > r[0] && pos <= r[1]; });
+        }
+
+        var b = new CM.RangeSetBuilder();
+        calque.lines.forEach(function (line) {
+            if (isHidden(line.positionEnd)) return;
+            // Направляющие отступов
+            for (var i = 0; i < line.indent; i++) {
+                var at = line.positionStart + i * 2;
+                if (line.code.substr(i * 2, 2) === '  ') b.add(at, at + 2, CM.Decoration.mark({ class: 'cm-guide' }));
+            }
+
+            var d = calque.describeLine(line);
+            if (!d.data || (d.type !== 'result' && d.type !== 'percent' && d.type !== 'error')) return;
+
+            var below = !!splitComment(line.code).comment;
+            b.add(line.positionEnd, line.positionEnd, CM.Decoration.widget({
+                widget: new HintWidget(d, below, line.indent),
+                side: 1,
+                block: below
+            }));
+        });
+        return b.finish();
+    };
+
+    // ---------- Клавиши ----------
+
+    function selectionNumber(state) {
+        var r = state.selection.main;
+        var sel = state.sliceDoc(r.from, r.to);
+        if (/^-?\d+(\.\d+)?$/.test(sel)) return { start: r.from, end: r.to, text: sel };
+        return null;
+    }
+
+    Calque.prototype.keys = function () {
+        var calque = this;
+        return [
+            { key: 'Tab', run: function (v) { return CM.acceptCompletion(v) || CM.indentMore(v); } },
+            { key: 'Shift-Tab', run: CM.indentLess },
+            {
+                key: 'Enter',
+                run: function (v) {
+                    var line = v.state.doc.lineAt(v.state.selection.main.head);
+                    var indent = line.text.match(/^ */)[0];
+                    if (isHeaderCode(line.text)) indent += '  ';
+                    v.dispatch(v.state.replaceSelection('\n' + indent), { scrollIntoView: true, userEvent: 'input' });
+                    return true;
+                }
+            },
+            { key: 'Mod-d', run: function () { calque.duplicateSelection(); return true; } },
+            { key: 'ArrowUp', run: function () { return calque.stepSelected(1, false); }, shift: function () { return calque.stepSelected(1, true); } },
+            { key: 'ArrowDown', run: function () { return calque.stepSelected(-1, false); }, shift: function () { return calque.stepSelected(-1, true); } }
+        ];
+    };
+
+    Calque.prototype.stepSelected = function (direction, big) {
+        var t = selectionNumber(this.view.state);
+        if (!t) return false;
+        this.replaceRange(t.start, t.end, stepNumber(t.text, direction, big), true);
+        return true;
+    };
+
+    Calque.prototype.replaceRange = function (start, end, text, select) {
+        this.view.dispatch({
+            changes: { from: start, to: end, insert: text },
+            selection: select ? { anchor: start, head: start + text.length } : { anchor: start + text.length },
+            userEvent: 'input'
+        });
+    };
+
+    Calque.prototype.duplicateSelection = function () {
+        var state = this.view.state, r = state.selection.main;
+        if (r.empty) {
+            var line = state.doc.lineAt(r.head);
+            this.view.dispatch({ changes: { from: line.to, insert: '\n' + line.text }, selection: { anchor: r.head + line.length + 1 } });
+        } else {
+            var text = state.sliceDoc(r.from, r.to);
+            this.view.dispatch({ changes: { from: r.to, insert: text }, selection: { anchor: r.to, head: r.to + text.length } });
+        }
+    };
+
+    Calque.prototype.addIndent = function () { CM.indentMore(this.view); };
+    Calque.prototype.removeIndent = function () { CM.indentLess(this.view); };
+
+    // ---------- Автодополнение ----------
+
+    Calque.prototype.complete = function (ctx) {
+        var calque = this;
+        var m = ctx.matchBefore(/[\p{L}\p{N}_.]+/u);
+        if (!m || /^[\d.]/.test(m.text)) return null;
+        var line = ctx.state.doc.lineAt(ctx.pos);
+        if (line.text.slice(0, ctx.pos - line.from).indexOf('#') >= 0) return null;
+
+        var segments = m.text.split('.');
+        var partial = segments.pop();
+        var options = [];
+
+        function option(label, insert, value, group) {
+            var detail = formatValue(value);
+            options.push({
+                label: label,
+                detail: detail || undefined,
+                type: group ? 'class' : 'variable',
+                apply: function (view, completion, from, to) {
+                    view.dispatch({
+                        changes: { from: m.from, to: to, insert: insert + (group ? '.' : '') },
+                        selection: { anchor: m.from + insert.length + (group ? 1 : 0) }
+                    });
+                    if (group) setTimeout(function () { CM.startCompletion(view); });
+                }
+            });
+        }
+
+        if (segments.length) {
+            var node = calque.tree.resolve(segments);
+            if (!node) return null;
+            node.children.forEach(function (child) {
+                option(child.name, node.key + '.' + child.name, calque.scope.get(child.key), child.children.size > 0);
+            });
+        } else {
+            if (!partial.length && !ctx.explicit) return null;
+            var seen = {};
+            var add = function (name, insert, value, group) {
+                if (seen[name]) return;
+                seen[name] = true;
+                option(name, insert, value, group);
+            };
+            calque.tree.root.children.forEach(function (child) {
+                add(child.name, child.name, calque.scope.get(child.key), child.children.size > 0);
+            });
+            calque.scope.forEach(function (value, key) {
+                if (key.indexOf('.') >= 0 || key === 'last') return;
+                if (typeof value === 'function') add(key, key + '(', undefined, false);
+                else add(key, key, value, false);
+            });
+            CalqueMath.FUNCTIONS.forEach(function (name) { add(name, name + '(', undefined, false); });
+        }
+
+        return {
+            from: m.from + m.text.length - partial.length,
+            options: options,
+            filter: true
+        };
+    };
+
+    // ---------- Выделение, копирование, ссылка ----------
+
+    // Строки, которые задевает выделение. Без выделения — все строки
+    Calque.prototype.selectedLines = function () {
+        var r = this.view.state.selection.main;
+        var s = r.from, e = r.to;
+        if (s === e) return this.lines;
+        return this.lines.filter(function (line) {
+            if (line.code.length === 0) return line.positionStart >= s && line.positionStart < e;
+            return Math.min(e, line.positionEnd) - Math.max(s, line.positionStart) > 0;
+        });
     };
 
     // Заменяем обращения вида Вкусности.Орехи на внутренние имена
@@ -657,135 +876,6 @@
         while (stack.length) closeGroup(stack.pop());
     };
 
-    Calque.prototype.readSelection = function () {
-        var calque = this;
-
-        calque.selectionStart = calque.inputEl.selectionStart;
-        calque.selectionEnd = calque.inputEl.selectionEnd;
-
-        calque.selection = calque.raw.substring(calque.selectionStart, calque.selectionEnd);
-
-        calque.lines.forEach(function (line) {
-            line.selected = line.positionEnd >= calque.selectionStart && line.positionStart <= calque.selectionEnd;
-        });
-    };
-
-    Calque.prototype.replaceSelection = function (replacement, select) {
-        var calque = this;
-
-        calque.readSelection();
-
-        select = select === false ? false : true;
-        replacement = replacement.toString();
-
-        var newSelectionStart = calque.selectionStart;
-        var newSelectionEnd = calque.selectionStart + replacement.length;
-
-        calque.inputEl.focus();
-        if (!document.execCommand('insertText', false, replacement)) {
-            calque.inputEl.setRangeText(replacement, calque.selectionStart, calque.selectionEnd, 'end');
-        }
-        calque.input();
-
-        if (select) {
-            calque.inputEl.setSelectionRange(newSelectionStart, newSelectionEnd);
-        } else {
-            calque.inputEl.setSelectionRange(newSelectionEnd, newSelectionEnd);
-        }
-    };
-
-    Calque.prototype.replaceRange = function (start, end, replacement, select) {
-        this.inputEl.focus();
-        this.inputEl.setSelectionRange(start, end);
-        this.replaceSelection(replacement, select);
-    };
-
-    Calque.prototype.duplicateSelection = function () {
-        var calque = this;
-
-        if (calque.selection === '') {
-            var line = calque.lines.find(function (line) {
-                return line.selected;
-            });
-
-            calque.inputEl.setSelectionRange(line.positionEnd, line.positionEnd);
-            calque.replaceSelection('\n' + line.code);
-            calque.inputEl.setSelectionRange(calque.selectionStart, calque.selectionStart);
-        } else {
-            var selection = calque.selection;
-
-            calque.inputEl.setSelectionRange(calque.selectionEnd, calque.selectionEnd);
-            calque.replaceSelection(selection);
-            calque.inputEl.setSelectionRange(calque.selectionStart - selection.length, calque.selectionStart);
-        }
-    };
-
-    Calque.prototype.addIndent = function () {
-        var calque = this;
-        calque.readSelection();
-
-        var selectionStart = Infinity;
-        var selectionEnd = 0;
-
-        var affected = 0;
-        var replacement = '';
-
-        calque.lines.forEach(function (line) {
-            if (!line.selected) return;
-
-            affected++;
-            replacement += '  ' + line.code + '\n';
-
-            if (line.positionStart <= selectionStart) selectionStart = line.positionStart;
-            if (line.positionEnd > selectionEnd) selectionEnd = line.positionEnd;
-        });
-
-        if (affected === 0) return;
-
-        replacement = replacement.substr(0, replacement.length - 1);
-
-        var newSelectionStart = calque.selectionStart + 2;
-        var newSelectionEnd = calque.selectionEnd + affected * 2;
-
-        calque.inputEl.setSelectionRange(selectionStart, selectionEnd);
-        calque.replaceSelection(replacement);
-        calque.inputEl.setSelectionRange(newSelectionStart, newSelectionEnd);
-    };
-
-    Calque.prototype.removeIndent = function () {
-        var calque = this;
-        calque.readSelection();
-
-        var selectionStart = Infinity;
-        var selectionEnd = 0;
-
-        var affected = 0;
-        var replacement = '';
-
-        calque.lines.forEach(function (line) {
-            if (!line.selected) return;
-            if (line.code.substr(0, 2) !== '  ') return;
-
-            affected++;
-            replacement += line.code.substr(2) + '\n';
-
-            if (line.positionStart <= selectionStart) selectionStart = line.positionStart;
-            if (line.positionEnd > selectionEnd) selectionEnd = line.positionEnd;
-        });
-
-        if (affected === 0) return;
-
-        replacement = replacement.substr(0, replacement.length - 1);
-
-        var newSelectionStart = Math.max(selectionStart, calque.selectionStart - 2);
-        var newSelectionEnd = Math.max(newSelectionStart, calque.selectionEnd - affected * 2);
-
-        calque.inputEl.setSelectionRange(selectionStart, selectionEnd);
-        calque.replaceSelection(replacement);
-        calque.inputEl.setSelectionRange(newSelectionStart, newSelectionEnd);
-    };
-
-    // Что показывать справа от строки: тип, префикс и текст
     // Число с единицей вроде «100 г» или «15 ккал / (100 г)» — без переменных
     function isPlainQuantity(node) {
         var plain = true;
@@ -875,47 +965,6 @@
         return { type: type, prefix: prefix, data: data.replace(/\n/g, '\\n') };
     };
 
-    function escapeAttr(s) {
-        return s.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-    }
-
-    function escapeHtml(s) {
-        return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-    }
-
-    Calque.prototype.repaint = function () {
-        var calque = this;
-
-        var html = '';
-
-        calque.lines.forEach(function (line) {
-            var d = calque.describeLine(line);
-
-            var code = line.code || ' ';
-            for (var i = 0; i < line.indent; i++) code = code.replace(/(\| )?  /, '$1| ');
-
-            var type = d.type + (line.selected ? ' highlight' : '');
-
-            html += '<div class="' + type + '">';
-            html += '<span class="code" data-code="' + escapeAttr(code) + '"></span>';
-            html += '<span class="hint" data-prefix="' + escapeAttr(d.prefix) + '">' + escapeHtml(d.data) + '</span>';
-            html += '</div>';
-        });
-
-        calque.outputEl.innerHTML = html;
-    };
-
-    // Строки, которые задевает выделение. Без выделения — все строки
-    Calque.prototype.selectedLines = function () {
-        var calque = this;
-        var s = calque.inputEl.selectionStart, e = calque.inputEl.selectionEnd;
-        if (s === e) return calque.lines;
-        return calque.lines.filter(function (line) {
-            if (line.code.length === 0) return line.positionStart >= s && line.positionStart < e;
-            return Math.min(e, line.positionEnd) - Math.max(s, line.positionStart) > 0;
-        });
-    };
-
     // Текст с результатами — для пересылки
     Calque.prototype.toText = function (lines) {
         var calque = this;
@@ -943,96 +992,7 @@
 
     Calque.prototype.shareLink = function () {
         var base = location.href.split('#')[0];
-        return encodeText(this.inputEl.value).then(function (h) { return base + '#' + h; });
-    };
-
-    // ---------- Подсказки ----------
-
-    Calque.prototype.updateSuggestions = function () {
-        var calque = this;
-        calque.suggestions = [];
-
-        if (calque.selectionStart === calque.selectionEnd) {
-            var text = calque.raw;
-            var caret = calque.selectionStart;
-            var lineStart = text.lastIndexOf('\n', caret - 1) + 1;
-            var before = text.substring(lineStart, caret);
-            var after = text.charAt(caret);
-            var m = before.match(/[\p{L}\p{N}_.]+$/u);
-
-            if (m && !/^[\d.]/.test(m[0]) && !/[\p{L}\p{N}_]/u.test(after) && before.indexOf('#') < 0) {
-                var token = m[0];
-                var segments = token.split('.');
-                var partial = segments.pop();
-                var lower = partial.toLowerCase();
-                var tokenStart = caret - token.length;
-                var list = [];
-
-                if (segments.length) {
-                    var node = calque.tree.resolve(segments);
-                    if (node) {
-                        var prefix = node.key + '.';
-                        node.children.forEach(function (child) {
-                            if (child.name.toLowerCase().indexOf(lower) === 0 && child.name !== partial) {
-                                list.push({ label: child.name, insert: prefix + child.name, value: calque.scope.get(child.key), start: tokenStart, end: caret, group: child.children.size > 0 });
-                            }
-                        });
-                    }
-                } else if (partial.length >= 1) {
-                    var seen = {};
-                    var add = function (name, insert, value, group) {
-                        if (seen[name] || name === partial) return;
-                        if (name.toLowerCase().indexOf(lower) !== 0) return;
-                        seen[name] = true;
-                        list.push({ label: name, insert: insert, value: value, start: tokenStart, end: caret, group: group });
-                    };
-                    calque.tree.root.children.forEach(function (child) {
-                        add(child.name, child.name, calque.scope.get(child.key), child.children.size > 0);
-                    });
-                    calque.scope.forEach(function (value, key) {
-                        if (key.indexOf('.') >= 0 || key === 'last') return;
-                        if (typeof value === 'function') add(key, key + '(', undefined, false);
-                        else add(key, key, value, false);
-                    });
-                    CalqueMath.FUNCTIONS.forEach(function (name) { add(name, name + '(', undefined, false); });
-                }
-
-                calque.suggestions = list.slice(0, 30);
-            }
-        }
-
-        calque.renderSuggestions();
-    };
-
-    Calque.prototype.applySuggestion = function (s) {
-        var calque = this;
-        calque.replaceRange(s.start, s.end, s.insert, false);
-        calque.suggestionsHidden = false;
-        calque.handler();
-    };
-
-    Calque.prototype.renderSuggestions = function () {
-        var calque = this;
-        if (!calque.hintsEl) return;
-        var list = calque.suggestionsHidden ? [] : calque.suggestions;
-        calque.hintsEl.innerHTML = '';
-        calque.hintsEl.style.display = list.length ? '' : 'none';
-        list.forEach(function (s) {
-            var b = document.createElement('button');
-            b.type = 'button';
-            b.className = 'chip' + (s.group ? ' group' : '');
-            var v = formatValue(s.value);
-            b.innerHTML = escapeHtml(s.label) + (s.group ? '.' : '') + (v ? ' <span class="chip-value">' + escapeHtml(v) + '</span>' : '');
-            keepFocus(b);
-            b.onclick = function () {
-                calque.applySuggestion(s);
-                if (s.group) {
-                    // Сразу показываем, что внутри группы
-                    calque.replaceSelection('.', false);
-                }
-            };
-            calque.hintsEl.appendChild(b);
-        });
+        return encodeText(this.getText()).then(function (h) { return base + '#' + h; });
     };
 
     // ---------- Панель ----------
@@ -1043,22 +1003,18 @@
     }
 
     Calque.prototype.stepAtCaret = function (direction, big) {
-        var calque = this;
-        var el = calque.inputEl;
-        var text = el.value;
-        var sel = text.substring(el.selectionStart, el.selectionEnd);
-        var target;
-        if (/^-?\d+(\.\d+)?$/.test(sel)) {
-            target = { start: el.selectionStart, end: el.selectionEnd, text: sel };
-        } else {
-            var lineStart = text.lastIndexOf('\n', el.selectionStart - 1) + 1;
-            target = numberAt(text, lineStart, el.selectionStart);
+        var state = this.view.state;
+        var target = selectionNumber(state);
+        if (!target) {
+            var head = state.selection.main.head;
+            var line = state.doc.lineAt(head);
+            target = numberAt(state.doc.toString(), line.from, head);
         }
         if (!target) {
-            calque.toast('Поставьте курсор на число');
+            this.toast('Поставьте курсор на число');
             return;
         }
-        calque.replaceRange(target.start, target.end, stepNumber(target.text, direction, big), true);
+        this.replaceRange(target.start, target.end, stepNumber(target.text, direction, big), true);
     };
 
     Calque.prototype.toast = function (message) {
@@ -1077,11 +1033,6 @@
     Calque.prototype.buildToolbar = function (container) {
         var calque = this;
         container.classList.add('calque-toolbar');
-
-        calque.hintsEl = document.createElement('div');
-        calque.hintsEl.className = 'hints';
-        calque.hintsEl.style.display = 'none';
-        container.appendChild(calque.hintsEl);
 
         var buttons = document.createElement('div');
         buttons.className = 'buttons';

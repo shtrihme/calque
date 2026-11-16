@@ -1,89 +1,118 @@
 body {
     margin: 0;
     padding: 0;
+    background: #fff;
+    color: #222;
 }
 
-.interface {
-    position: absolute;
-    top: calc(env(safe-area-inset-top, 0px) + 44px);
-    right: 0;
-    bottom: 0;
-    left: 0;
-    height: 100%;
+/* Редактор */
+.calque-editor {
+    padding: calc(env(safe-area-inset-top, 0px) + 44px) 0 140px;
 }
 
-.interface .input, .interface .output {
-    position: absolute;
-    top: 0;
-    right: 0;
-    left: 0;
-    width: 100%;
-    border: none;
-    margin: 0;
+.calque-editor .cm-editor {
     font-family: 'Menlo', 'Monaco', 'Consolas', courier, monospace;
     font-size: 16px;
     line-height: 1.5;
-    box-sizing: border-box;
-    white-space: pre-wrap;
-    word-break: break-word;
 }
 
-.interface .input {
-    overflow: auto;
+.calque-editor .cm-editor.cm-focused {
     outline: none;
-    background: none;
-    resize: none;
-    padding: 20px 20px 160px;
 }
 
-.interface .output {
-    overflow: hidden;
-    padding: 20px 0 160px;
+.calque-editor .cm-scroller {
+    font-family: inherit;
+    line-height: inherit;
+    overflow: visible;
 }
 
-.interface .output div {
-    display: block;
-    padding: 0 20px;
+.calque-editor .cm-content {
+    padding: 16px 0;
 }
 
-.interface .output div.highlight {
-    background-color: #f9f9f9;
+.calque-editor .cm-line {
+    padding: 0 16px 0 2px;
 }
 
-.interface .output .code {
-    color: #E9E9E9;
+.calque-editor .cm-gutters {
+    background: transparent;
+    border: none;
+    color: #bbb;
 }
 
-.interface .output .code:before {
-    content: attr(data-code);
+.calque-editor .cm-foldGutter .cm-gutterElement {
+    padding: 0 2px 0 6px;
+    cursor: pointer;
 }
 
-.interface .output .hint:before {
-    content: attr(data-prefix);
-    color: #E9E9E9;
-    white-space: pre;
+.calque-editor .cm-fold-marker {
+    font-size: 12px;
 }
 
-.interface .output .hint {
-    z-index: 1;
-    position: absolute;
-    white-space: pre;
+.calque-editor .cm-activeLine {
+    background: #f7f7f7;
 }
 
-.interface .output .help {
+.calque-editor .cm-foldPlaceholder {
+    background: #eee;
+    border: none;
+    color: #888;
+    padding: 0 6px;
+    margin-left: 6px;
+}
+
+/* Направляющая у каждого уровня отступа */
+.calque-editor .cm-guide {
+    box-shadow: inset 1px 0 0 #e6e6e6;
+}
+
+/* Результаты */
+.cm-hint {
     color: silver;
+    white-space: pre-wrap;
 }
 
-.interface .output .result {
-    color: silver;
+.cm-hint-prefix {
+    color: #ddd;
 }
 
-.interface .output .error {
-    color: red;
+.cm-hint-error {
+    color: #d33;
 }
 
-.interface .output .percent {
+.cm-hint-percent {
     color: #9bb8d3;
+}
+
+.cm-hint-block {
+    padding-bottom: 2px;
+}
+
+/* Подсветка */
+.tok-comment { color: #9a9a9a; }
+.tok-heading { font-weight: 600; }
+.tok-formula { color: #7a52b3; }
+.tok-nosum { color: #a86b1d; }
+.tok-operator { color: #a86b1d; }
+.tok-number { color: #1d5fa8; }
+
+/* Подсказки у курсора */
+.cm-tooltip.cm-tooltip-autocomplete {
+    border: 1px solid #ddd;
+    border-radius: 8px;
+    background: #fff;
+    overflow: hidden;
+    font-family: 'Menlo', 'Monaco', 'Consolas', courier, monospace;
+}
+
+.cm-tooltip.cm-tooltip-autocomplete > ul > li {
+    padding: 6px 10px;
+}
+
+.cm-tooltip-autocomplete .cm-completionDetail {
+    color: #999;
+    font-style: normal;
+    margin-left: 10px;
 }
 
 /* Панель снизу */
@@ -97,18 +126,6 @@ body {
     border-top: 1px solid #e3e3e3;
     font-family: -apple-system, 'Segoe UI', Roboto, sans-serif;
     padding: 6px 8px calc(6px + env(safe-area-inset-bottom));
-}
-
-.calque-toolbar .hints {
-    display: flex;
-    gap: 6px;
-    overflow-x: auto;
-    padding-bottom: 6px;
-    scrollbar-width: none;
-}
-
-.calque-toolbar .hints::-webkit-scrollbar {
-    display: none;
 }
 
 .calque-toolbar .buttons {
@@ -140,27 +157,6 @@ body {
 
 .calque-toolbar button.gap {
     margin-left: 6px;
-}
-
-.calque-toolbar .chip {
-    flex: 0 0 auto;
-}
-
-.calque-toolbar .chip {
-    height: 34px;
-    border-radius: 17px;
-    font-family: 'Menlo', 'Monaco', 'Consolas', courier, monospace;
-    font-size: 14px;
-    white-space: nowrap;
-}
-
-.calque-toolbar .chip.group {
-    font-weight: 600;
-}
-
-.calque-toolbar .chip-value {
-    color: #888;
-    font-weight: normal;
 }
 
 .calque-toast {
@@ -295,6 +291,48 @@ body {
 }
 
 @media (prefers-color-scheme: dark) {
+    body {
+        background-color: #212121;
+        color: #eee;
+    }
+
+    .calque-editor .cm-activeLine {
+        background: #2c2c2c;
+    }
+
+    .calque-editor .cm-guide {
+        box-shadow: inset 1px 0 0 #3a3a3a;
+    }
+
+    .calque-editor .cm-cursor {
+        border-left-color: #eee;
+    }
+
+    .calque-editor .cm-selectionBackground, .calque-editor .cm-focused .cm-selectionBackground {
+        background: #3d4b5c !important;
+    }
+
+    .cm-hint {
+        color: #777;
+    }
+
+    .cm-hint-prefix {
+        color: #555;
+    }
+
+    .cm-hint-percent {
+        color: #5f7f9c;
+    }
+
+    .tok-comment { color: #777; }
+    .tok-formula { color: #b597e0; }
+    .tok-nosum, .tok-operator { color: #d9a45b; }
+    .tok-number { color: #7fb0e6; }
+
+    .cm-tooltip.cm-tooltip-autocomplete {
+        background: #2a2a2a;
+        border-color: #444;
+    }
     .calque-tabs {
         background: rgba(33, 33, 33, 0.96);
         border-bottom-color: #424242;
@@ -337,32 +375,6 @@ body {
         background: #3a3a3a;
     }
 
-    .interface .output .percent {
-        color: #5f7f9c;
-    }
-
-    body, textarea {
-        background-color: #212121;
-        color: #EEEEEE;
-    }
     
-    .interface .output div.highlight {
-        background-color: #424242;
-    }
 
-    .interface .output .code {
-        color: #616161;
-    }
-
-    .interface .output .hint:before {
-        color: #616161;
-    }
-
-    .interface .output .help {
-        color: #757575;
-    }
-
-    .interface .output .result {
-        color: #757575;
-    }
 }

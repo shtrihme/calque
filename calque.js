@@ -323,7 +323,7 @@
                 icons: false
             }),
             CM.keymap.of(calque.keys().concat(CM.closeBracketsKeymap, CM.searchKeymap, CM.foldKeymap, CM.historyKeymap, CM.defaultKeymap)),
-            CM.EditorView.updateListener.of(function (u) { calque.autoFormatOnLeave(u); }),
+            CM.EditorView.updateListener.of(function (u) { calque.autoFormatOnLeave(u); calque.updateHistoryButtons(); }),
             CM.EditorView.updateListener.of(function (u) {
                 if (!u.docChanged) return;
                 var text = u.state.doc.toString();
@@ -346,6 +346,7 @@
     // Новый текст с чистой историей отмены — для переключения вкладок
     Calque.prototype.setText = function (text) {
         this.view.setState(CM.EditorState.create({ doc: text, extensions: this.extensions }));
+        this.updateHistoryButtons();
     };
 
     Calque.prototype.setLineNumbers = function (on) {
@@ -1343,6 +1344,12 @@
         this.replaceRange(target.start, target.end, stepNumber(target.text, direction, big), true);
     };
 
+    Calque.prototype.updateHistoryButtons = function () {
+        if (!this.undoButton) return;
+        this.undoButton.disabled = CM.undoDepth(this.view.state) === 0;
+        this.redoButton.disabled = CM.redoDepth(this.view.state) === 0;
+    };
+
     Calque.prototype.toast = function (message) {
         var calque = this;
         if (!calque.toastEl) {
@@ -1376,7 +1383,9 @@
             return b;
         }
 
-        button('−10', 'Уменьшить число на 10 шагов', function () { calque.stepAtCaret(-1, true); });
+        calque.undoButton = button('↶', 'Отменить', function () { CM.undo(calque.view); });
+        calque.redoButton = button('↷', 'Повторить', function () { CM.redo(calque.view); });
+        button('−10', 'Уменьшить число на 10 шагов', function () { calque.stepAtCaret(-1, true); }, 'gap');
         button('−1', 'Уменьшить число', function () { calque.stepAtCaret(-1, false); });
         button('+1', 'Увеличить число', function () { calque.stepAtCaret(1, false); });
         button('+10', 'Увеличить число на 10 шагов', function () { calque.stepAtCaret(1, true); });
@@ -1394,6 +1403,8 @@
                 return copyText(url).then(function () { calque.toast('Ссылка скопирована'); });
             });
         });
+
+        calque.updateHistoryButtons();
 
         // Держим панель над экранной клавиатурой
         if (window.visualViewport) {

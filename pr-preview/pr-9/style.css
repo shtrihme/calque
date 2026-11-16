@@ -181,16 +181,16 @@ body {
 
 .calque-toolbar .buttons {
     display: flex;
-    gap: 6px;
+    gap: 4px;
     flex-wrap: nowrap;
     overflow-x: auto;
 }
 
 .calque-toolbar button {
     flex: 1 1 0;
-    min-width: 36px;
+    min-width: 0;
     height: 40px;
-    padding: 0 6px;
+    padding: 0 2px;
     border: 1px solid #d6d6d6;
     border-radius: 8px;
     background: #fff;
@@ -207,7 +207,18 @@ body {
 }
 
 .calque-toolbar button.gap {
-    margin-left: 6px;
+    margin-left: 3px;
+}
+
+@media (max-width: 380px) {
+    .calque-toolbar button {
+        font-size: 13px;
+    }
+}
+
+.calque-toolbar button:disabled {
+    opacity: 0.35;
+    cursor: default;
 }
 
 .calque-toast {

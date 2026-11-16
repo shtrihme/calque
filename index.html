@@ -7,14 +7,15 @@
     <link rel="icon" type='image/png' href="favicon.png">
     <link rel="stylesheet" href="style.css">
     <script src="math.min.js"></script>
+    <script src="cm.js"></script>
     <script src="calque-math.js"></script>
     <script src="calque.js"></script>
     <script src="tabs.js"></script>
     <script>
         window.onload = function () {
             CalqueTabs.start({
-                input: document.getElementById('input'),
-                output: document.getElementById('output'),
+                editor: document.getElementById('editor'),
+                example: document.getElementById('example').textContent,
                 toolbar: document.getElementById('toolbar'),
                 bar: document.getElementById('tabs')
             });
@@ -23,9 +24,8 @@
 </head>
 <body>
     <div class="calque-tabs" id="tabs"></div>
-    <div class="interface">
-        <div class="output" id="output"></div>
-        <textarea class="input" id="input" spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off"># Calque — калькулятор, который считает на ходу
+    <div class="calque-editor" id="editor"></div>
+    <script type="text/plain" id="example"># Calque — калькулятор, который считает на ходу
 
 # Выражения
 2 + 2 * 2
@@ -59,7 +59,7 @@ b = a * 2
     калорийность := 200 ккал / (100 г)
 Салат.ккал
 
-# Обращение через точку. Наберите «вкусности.» — внизу появятся подсказки
+# Обращение через точку. Наберите «вкусности.» — появится список
 Вкусности.Орехи.Арахис * 2
 Вкусности.Конфеты / Вкусности
 
@@ -83,12 +83,13 @@ fraction(1/3) + fraction(1/6)
 # Клавиши
 # Ctrl+D — повторить строку
 # Выделить число, стрелки вверх и вниз — менять его, с Shift — шаг ×10
-# Tab — принять первую подсказку или добавить отступ, Shift+Tab — убрать отступ
-# На телефоне то же самое — кнопками внизу
+# Tab — принять подсказку или добавить отступ, Shift+Tab — убрать отступ
+# ▾ слева от группы сворачивает её
+# Если в строке есть комментарий, результат появится под ней
+# На телефоне — кнопками внизу
 # + сверху — новый расчёт, × — закрыть текущий
 
-# https://github.com/shtrihme/calque</textarea>
-    </div>
+# https://github.com/shtrihme/calque</script>
     <div id="toolbar"></div>
 </body>
 </html>

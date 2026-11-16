@@ -299,11 +299,26 @@
                     return el;
                 }
             }),
+            CM.EditorState.allowMultipleSelections.of(true),
+            CM.rectangularSelection(),
+            CM.crosshairCursor(),
+            CM.bracketMatching(),
+            CM.closeBrackets(),
+            CM.highlightSelectionMatches({ highlightWordAroundCursor: true, minSelectionLength: 2 }),
+            CM.search({ top: true }),
+            CM.EditorState.phrases.of(PHRASES),
+            CM.linter(function (view) { return calque.diagnostics(view.state); }, { delay: 400 }),
+            calque.infoField(),
+            CM.hoverTooltip(function (view, pos) {
+                // Если значение уже показано по нажатию, второе не нужно
+                if (view.state.field(calque.info, false)) return null;
+                return calque.infoAt(view.state, pos);
+            }, { hoverTime: 350 }),
             CM.autocompletion({
                 override: [function (ctx) { return calque.complete(ctx); }],
                 icons: false
             }),
-            CM.keymap.of(calque.keys().concat(CM.foldKeymap, CM.historyKeymap, CM.defaultKeymap)),
+            CM.keymap.of(calque.keys().concat(CM.closeBracketsKeymap, CM.searchKeymap, CM.foldKeymap, CM.historyKeymap, CM.defaultKeymap)),
             CM.EditorView.updateListener.of(function (u) {
                 if (!u.docChanged) return;
                 var text = u.state.doc.toString();
@@ -380,6 +395,145 @@
             }));
         });
         return b.finish();
+    };
+
+    // ---------- Ошибки в тексте ----------
+
+    var PHRASES = {
+        'Find': 'Найти',
+        'Replace': 'Заменить на',
+        'next': 'дальше',
+        'previous': 'назад',
+        'all': 'все',
+        'match case': 'с учётом регистра',
+        'regexp': 'регулярное выражение',
+        'by word': 'слово целиком',
+        'replace': 'заменить',
+        'replace all': 'заменить все',
+        'close': 'закрыть',
+        'current match': 'текущее совпадение',
+        'on line': 'в строке',
+        'Folded lines': 'Свёрнутые строки',
+        'Unfolded lines': 'Развёрнутые строки',
+        'unfold': 'развернуть',
+        'Fold line': 'Свернуть',
+        'Unfold line': 'Развернуть',
+        'Diagnostics': 'Ошибки',
+        'No diagnostics': 'Ошибок нет'
+    };
+
+    // Где в строке ошибка: позиция из сообщения math.js или неизвестное имя
+    function errorRange(line, message, bare) {
+        var start = line.positionStart, end = line.positionStart + bare.length;
+        var m = /\(char (\d+)\)/.exec(message);
+        if (m) {
+            var at = Math.min(parseInt(m[1], 10) - 1, Math.max(0, bare.length - 1));
+            return { from: start + at, to: Math.min(end, start + at + 1) };
+        }
+        m = /Undefined (?:symbol|function) ([\p{L}\p{N}_.]+)/u.exec(message);
+        if (m) {
+            var re = new RegExp('(^|[^\\p{L}\\p{N}_])(' + m[1].replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + ')(?![\\p{L}\\p{N}_])', 'u');
+            var found = re.exec(bare);
+            if (found) {
+                var from = start + found.index + found[1].length;
+                return { from: from, to: from + found[2].length };
+            }
+        }
+        var lead = bare.match(/^\s*/)[0].length;
+        return { from: start + lead, to: Math.max(start + lead + 1, end) };
+    }
+
+    Calque.prototype.diagnostics = function (state) {
+        var calque = this;
+        if (state.doc.toString() !== calque.raw) {
+            calque.raw = state.doc.toString();
+            calque.recalc();
+        }
+        var head = state.selection.main.head;
+        var out = [];
+        calque.lines.forEach(function (line) {
+            var message = line.error || line.rowError || (line.summing && !line.record ? line.groupError : null);
+            if (!message) return;
+            // Строку, которую сейчас набирают, не подчёркиваем
+            if (head >= line.positionStart && head <= line.positionEnd) return;
+            var bare = splitComment(line.code).code;
+            if (!bare.trim()) return;
+            var r = errorRange(line, message, bare);
+            out.push({ from: r.from, to: Math.min(r.to, state.doc.length), severity: 'error', message: message });
+        });
+        return out;
+    };
+
+    // ---------- Значение имени по нажатию и наведению ----------
+
+    Calque.prototype.infoAt = function (state, pos) {
+        var calque = this;
+        var line = state.doc.lineAt(pos);
+        var text = line.text;
+        var rel = pos - line.from;
+        if (splitComment(text).code.length < rel) return null;
+
+        var re = /[\p{L}_][\p{L}\p{N}_]*(?:\.[\p{L}_][\p{L}\p{N}_]*)*/gu, m;
+        while ((m = re.exec(text))) {
+            if (rel < m.index || rel > m.index + m[0].length) continue;
+            // Путь берём до той части, на которую нажали
+            var upto = text.slice(m.index, Math.max(rel, m.index + 1));
+            var tail = text.slice(m.index + upto.length).match(/^[\p{L}\p{N}_]*/u)[0];
+            var name = (upto + tail).replace(/^_/, '');
+            var info = calque.describeName(name);
+            if (!info) return null;
+            return {
+                pos: line.from + m.index,
+                end: line.from + m.index + m[0].length,
+                above: true,
+                create: function () {
+                    var dom = document.createElement('div');
+                    dom.className = 'cm-info';
+                    dom.innerHTML = '<b>' + escapeHtml(info.name) + '</b> = ' + escapeHtml(info.value) +
+                        (info.where ? '<div class="cm-info-where">' + escapeHtml(info.where) + '</div>' : '');
+                    return { dom: dom };
+                }
+            };
+        }
+        return null;
+    };
+
+    Calque.prototype.describeName = function (name) {
+        var calque = this;
+        var node = name.indexOf('.') >= 0 ? calque.tree.resolve(name.split('.')) : null;
+        var key = node ? node.key : name;
+        var value = calque.scope.has(key) ? calque.scope.get(key) : undefined;
+        if (value === undefined && !node) {
+            var root = calque.tree.resolve([name]);
+            if (root) { node = root; key = root.key; value = calque.scope.get(key); }
+        }
+        if (value === undefined || value === null) return null;
+
+        var shown;
+        if (typeof value === 'function') shown = 'функция';
+        else if (value && typeof value === 'object' && !value.isUnit && !value.isMatrix && !value.isFraction && !value.isComplex && !Array.isArray(value)) {
+            shown = Object.keys(value).map(function (k) { return k + ' ' + formatValue(value[k]); }).join(' · ');
+        } else shown = formatValue(value);
+
+        var line = node && node.line ? node.line : calque.defs[name];
+        return { name: key, value: shown, where: line ? 'строка ' + (line.index + 1) : '' };
+    };
+
+    // По нажатию в имя показываем его значение, по следующему действию прячем
+    Calque.prototype.infoField = function () {
+        var calque = this;
+        calque.info = CM.StateField.define({
+            create: function () { return null; },
+            update: function (tip, tr) {
+                if (tr.docChanged) return null;
+                if (!tr.selection) return tip;
+                var r = tr.state.selection.main;
+                if (!r.empty || !tr.isUserEvent('select.pointer')) return null;
+                return calque.infoAt(tr.state, r.head);
+            },
+            provide: function (f) { return CM.showTooltip.from(f); }
+        });
+        return calque.info;
     };
 
     // ---------- Клавиши ----------
@@ -610,6 +764,7 @@
         calque.lines = [];
         calque.tree = new Tree();
         calque.suffix = {};
+        calque.defs = {};
         var scope = calque.scope = new Map();
         scope.set('last', null);
 
@@ -859,6 +1014,8 @@
             if (line.result === undefined) return;
 
             var named = line.parsed && line.parsed.isAssignmentNode && line.parsed.object.isSymbolNode;
+            if (named) calque.defs[line.parsed.object.name] = line;
+            if (line.parsed && line.parsed.isFunctionAssignmentNode) calque.defs[line.parsed.name] = line;
 
             // Значение внутри группы доступно и по полному пути
             if (parent && named) {

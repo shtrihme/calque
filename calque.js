@@ -280,7 +280,11 @@
             provide: function (f) { return CM.EditorView.decorations.from(f); }
         });
 
+        calque.gutterSlot = new CM.Compartment();
+        calque.settings = { lineNumbers: !!options.lineNumbers, autoFormat: !!options.autoFormat };
+
         calque.extensions = [
+            calque.gutterSlot.of(calque.settings.lineNumbers ? CM.lineNumbers() : []),
             calque.resultsField,
             CM.history(),
             CM.drawSelection(),
@@ -299,11 +303,27 @@
                     return el;
                 }
             }),
+            CM.EditorState.allowMultipleSelections.of(true),
+            CM.rectangularSelection(),
+            CM.crosshairCursor(),
+            CM.bracketMatching(),
+            CM.closeBrackets(),
+            CM.highlightSelectionMatches({ highlightWordAroundCursor: true, minSelectionLength: 2 }),
+            CM.search({ top: true }),
+            CM.EditorState.phrases.of(PHRASES),
+            CM.linter(function (view) { return calque.diagnostics(view.state); }, { delay: 400 }),
+            calque.infoField(),
+            CM.hoverTooltip(function (view, pos) {
+                // Если значение уже показано по нажатию, второе не нужно
+                if (view.state.field(calque.info, false)) return null;
+                return calque.infoAt(view.state, pos);
+            }, { hoverTime: 350 }),
             CM.autocompletion({
                 override: [function (ctx) { return calque.complete(ctx); }],
                 icons: false
             }),
-            CM.keymap.of(calque.keys().concat(CM.foldKeymap, CM.historyKeymap, CM.defaultKeymap)),
+            CM.keymap.of(calque.keys().concat(CM.closeBracketsKeymap, CM.searchKeymap, CM.foldKeymap, CM.historyKeymap, CM.defaultKeymap)),
+            CM.EditorView.updateListener.of(function (u) { calque.autoFormatOnLeave(u); calque.updateHistoryButtons(); }),
             CM.EditorView.updateListener.of(function (u) {
                 if (!u.docChanged) return;
                 var text = u.state.doc.toString();
@@ -326,6 +346,57 @@
     // Новый текст с чистой историей отмены — для переключения вкладок
     Calque.prototype.setText = function (text) {
         this.view.setState(CM.EditorState.create({ doc: text, extensions: this.extensions }));
+        this.updateHistoryButtons();
+    };
+
+    Calque.prototype.setLineNumbers = function (on) {
+        this.settings.lineNumbers = !!on;
+        this.view.dispatch({ effects: this.gutterSlot.reconfigure(on ? CM.lineNumbers() : []) });
+    };
+
+    Calque.prototype.setAutoFormat = function (on) {
+        this.settings.autoFormat = !!on;
+        this.lastLine = null;
+    };
+
+    Calque.prototype.formatAll = function () {
+        var state = this.view.state;
+        var text = state.doc.toString();
+        var formatted = formatText(text);
+        if (formatted === text) { this.toast('Уже отформатировано'); return; }
+        var head = state.doc.lineAt(state.selection.main.head).number;
+        var doc = CM.EditorState.create({ doc: formatted }).doc;
+        var pos = doc.line(Math.min(head, doc.lines)).to;
+        this.view.dispatch({ changes: { from: 0, to: text.length, insert: formatted }, selection: { anchor: pos }, userEvent: 'format' });
+        this.toast('Отформатировано');
+    };
+
+    // Строку форматируем, когда с неё ушли: пока её набирают, не трогаем
+    Calque.prototype.autoFormatOnLeave = function (u) {
+        var calque = this;
+        var state = u.state;
+        var current = state.doc.lineAt(state.selection.main.head);
+        if (!calque.settings.autoFormat || u.transactions.some(function (tr) { return tr.isUserEvent('format'); })) {
+            calque.lastLine = current.from;
+            return;
+        }
+        if (calque.lastLine !== null && calque.lastLine !== undefined && (u.docChanged || u.selectionSet)) {
+            var from = u.changes.mapPos(calque.lastLine, -1);
+            if (from <= state.doc.length) {
+                var left = state.doc.lineAt(from);
+                if (left.number !== current.number) {
+                    var formatted = formatLine(left.text);
+                    if (formatted !== left.text) {
+                        Promise.resolve().then(function () {
+                            var now = calque.view.state.doc;
+                            if (left.to > now.length || now.sliceString(left.from, left.to) !== left.text) return;
+                            calque.view.dispatch({ changes: { from: left.from, to: left.to, insert: formatted }, userEvent: 'format' });
+                        });
+                    }
+                }
+            }
+        }
+        calque.lastLine = current.from;
     };
 
     Calque.prototype.getText = function () {
@@ -382,6 +453,221 @@
         return b.finish();
     };
 
+    // ---------- Автоформат ----------
+
+    var BINARY = { '+': 1, '-': 1, '*': 1, '/': 1, '=': 1, ':=': 1, '==': 1, '!=': 1, '<=': 1, '>=': 1, '<': 1, '>': 1 };
+    var OPENERS = { '(': 1, '[': 1 };
+    var CLOSERS = { ')': 1, ']': 1 };
+
+    // Разбиваем выражение на части и запоминаем, был ли перед частью пробел
+    function tokenize(src) {
+        var tokens = [], i = 0, space = false, m;
+        while (i < src.length) {
+            var rest = src.slice(i);
+            if ((m = rest.match(/^\s+/))) { space = true; i += m[0].length; continue; }
+            if ((m = rest.match(/^("([^"\\]|\\.)*"?|'([^'\\]|\\.)*'?)/))) {}
+            else if ((m = rest.match(/^\d+(\.\d+)?(e[+-]?\d+)?(?![\p{L}_])/iu))) {}
+            else if ((m = rest.match(/^\d+(\.\d+)?/))) {}
+            else if ((m = rest.match(/^[\p{L}_][\p{L}\p{N}_]*(\.[\p{L}_][\p{L}\p{N}_]*)*/u))) {}
+            else if ((m = rest.match(/^(:=|==|!=|<=|>=)/))) {}
+            else m = [rest[0]];
+            tokens.push({ t: m[0], space: space });
+            space = false;
+            i += m[0].length;
+        }
+        return tokens;
+    }
+
+    function formatExpr(src) {
+        var tokens = tokenize(src);
+        var out = '';
+        tokens.forEach(function (tok, k) {
+            var prev = tokens[k - 1];
+            var t = tok.t;
+            if (!prev) { out += t; return; }
+            var p = prev.t;
+            var unary = (t === '-' || t === '+') && (k === 0 || BINARY[p] || OPENERS[p] || p === ',' || p === ';' || p === '^' || p === ':');
+            var prevUnary = (p === '-' || p === '+') && prev.unary;
+            tok.unary = unary;
+            var sp;
+            if (t === ',' || t === ';') sp = false;
+            else if (p === ',' || p === ';') sp = true;
+            else if (t === '^' || p === '^') sp = false;
+            else if (CLOSERS[t] || OPENERS[p]) sp = false;
+            else if (prevUnary) sp = false;
+            else if (t === ':' && k === tokens.length - 1) sp = false;
+            else if (BINARY[t] && !unary) sp = true;
+            else if (BINARY[p] && !prevUnary) sp = true;
+            else if (unary) sp = tok.space || !!BINARY[p] || p === ',';
+            else sp = tok.space;
+            out += (sp ? ' ' : '') + t;
+        });
+        return out;
+    }
+
+    function formatLine(code) {
+        if (!code.trim()) return '';
+        var lead = code.match(/^[ \t]*/)[0];
+        var indent = new Array(Math.floor(lead.replace(/\t/g, '  ').length / 2) + 1).join('  ');
+        var parts = splitComment(code.slice(lead.length));
+        var body = formatExpr(parts.code.trim());
+        var comment = parts.comment ? parts.comment.replace(/^#\s*/, '# ').replace(/\s+$/, '') : '';
+        if (comment === '# ') comment = '#';
+        return indent + body + (comment ? (body ? ' ' : '') + comment : '');
+    }
+
+    function formatText(text) {
+        var lines = text.split('\n').map(formatLine);
+        var out = [];
+        lines.forEach(function (l) {
+            if (l === '' && out.length && out[out.length - 1] === '') return;
+            out.push(l);
+        });
+        return out.join('\n');
+    }
+
+    Calque.formatLine = formatLine;
+    Calque.formatText = formatText;
+
+    // ---------- Ошибки в тексте ----------
+
+    var PHRASES = {
+        'Find': 'Найти',
+        'Replace': 'Заменить на',
+        'next': 'дальше',
+        'previous': 'назад',
+        'all': 'все',
+        'match case': 'с учётом регистра',
+        'regexp': 'регулярное выражение',
+        'by word': 'слово целиком',
+        'replace': 'заменить',
+        'replace all': 'заменить все',
+        'close': 'закрыть',
+        'current match': 'текущее совпадение',
+        'on line': 'в строке',
+        'Folded lines': 'Свёрнутые строки',
+        'Unfolded lines': 'Развёрнутые строки',
+        'unfold': 'развернуть',
+        'Fold line': 'Свернуть',
+        'Unfold line': 'Развернуть',
+        'Diagnostics': 'Ошибки',
+        'No diagnostics': 'Ошибок нет'
+    };
+
+    // Где в строке ошибка: позиция из сообщения math.js или неизвестное имя
+    function errorRange(line, message, bare) {
+        var start = line.positionStart, end = line.positionStart + bare.length;
+        var m = /\(char (\d+)\)/.exec(message);
+        if (m) {
+            var at = Math.min(parseInt(m[1], 10) - 1, Math.max(0, bare.length - 1));
+            return { from: start + at, to: Math.min(end, start + at + 1) };
+        }
+        m = /Undefined (?:symbol|function) ([\p{L}\p{N}_.]+)/u.exec(message);
+        if (m) {
+            var re = new RegExp('(^|[^\\p{L}\\p{N}_])(' + m[1].replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + ')(?![\\p{L}\\p{N}_])', 'u');
+            var found = re.exec(bare);
+            if (found) {
+                var from = start + found.index + found[1].length;
+                return { from: from, to: from + found[2].length };
+            }
+        }
+        var lead = bare.match(/^\s*/)[0].length;
+        return { from: start + lead, to: Math.max(start + lead + 1, end) };
+    }
+
+    Calque.prototype.diagnostics = function (state) {
+        var calque = this;
+        if (state.doc.toString() !== calque.raw) {
+            calque.raw = state.doc.toString();
+            calque.recalc();
+        }
+        var head = state.selection.main.head;
+        var out = [];
+        calque.lines.forEach(function (line) {
+            var message = line.error || line.rowError || (line.summing && !line.record ? line.groupError : null);
+            if (!message) return;
+            // Строку, которую сейчас набирают, не подчёркиваем
+            if (head >= line.positionStart && head <= line.positionEnd) return;
+            var bare = splitComment(line.code).code;
+            if (!bare.trim()) return;
+            var r = errorRange(line, message, bare);
+            out.push({ from: r.from, to: Math.min(r.to, state.doc.length), severity: 'error', message: message });
+        });
+        return out;
+    };
+
+    // ---------- Значение имени по нажатию и наведению ----------
+
+    Calque.prototype.infoAt = function (state, pos) {
+        var calque = this;
+        var line = state.doc.lineAt(pos);
+        var text = line.text;
+        var rel = pos - line.from;
+        if (splitComment(text).code.length < rel) return null;
+
+        var re = /[\p{L}_][\p{L}\p{N}_]*(?:\.[\p{L}_][\p{L}\p{N}_]*)*/gu, m;
+        while ((m = re.exec(text))) {
+            if (rel < m.index || rel > m.index + m[0].length) continue;
+            // Путь берём до той части, на которую нажали
+            var upto = text.slice(m.index, Math.max(rel, m.index + 1));
+            var tail = text.slice(m.index + upto.length).match(/^[\p{L}\p{N}_]*/u)[0];
+            var name = (upto + tail).replace(/^_/, '');
+            var info = calque.describeName(name);
+            if (!info) return null;
+            return {
+                pos: line.from + m.index,
+                end: line.from + m.index + m[0].length,
+                above: true,
+                create: function () {
+                    var dom = document.createElement('div');
+                    dom.className = 'cm-info';
+                    dom.innerHTML = '<b>' + escapeHtml(info.name) + '</b> = ' + escapeHtml(info.value) +
+                        (info.where ? '<div class="cm-info-where">' + escapeHtml(info.where) + '</div>' : '');
+                    return { dom: dom };
+                }
+            };
+        }
+        return null;
+    };
+
+    Calque.prototype.describeName = function (name) {
+        var calque = this;
+        var node = name.indexOf('.') >= 0 ? calque.tree.resolve(name.split('.')) : null;
+        var key = node ? node.key : name;
+        var value = calque.scope.has(key) ? calque.scope.get(key) : undefined;
+        if (value === undefined && !node) {
+            var root = calque.tree.resolve([name]);
+            if (root) { node = root; key = root.key; value = calque.scope.get(key); }
+        }
+        if (value === undefined || value === null) return null;
+
+        var shown;
+        if (typeof value === 'function') shown = 'функция';
+        else if (value && typeof value === 'object' && !value.isUnit && !value.isMatrix && !value.isFraction && !value.isComplex && !Array.isArray(value)) {
+            shown = Object.keys(value).map(function (k) { return k + ' ' + formatValue(value[k]); }).join(' · ');
+        } else shown = formatValue(value);
+
+        var line = node && node.line ? node.line : calque.defs[name];
+        return { name: key, value: shown, where: line ? 'строка ' + (line.index + 1) : '' };
+    };
+
+    // По нажатию в имя показываем его значение, по следующему действию прячем
+    Calque.prototype.infoField = function () {
+        var calque = this;
+        calque.info = CM.StateField.define({
+            create: function () { return null; },
+            update: function (tip, tr) {
+                if (tr.docChanged) return null;
+                if (!tr.selection) return tip;
+                var r = tr.state.selection.main;
+                if (!r.empty || !tr.isUserEvent('select.pointer')) return null;
+                return calque.infoAt(tr.state, r.head);
+            },
+            provide: function (f) { return CM.showTooltip.from(f); }
+        });
+        return calque.info;
+    };
+
     // ---------- Клавиши ----------
 
     function selectionNumber(state) {
@@ -407,6 +693,7 @@
                 }
             },
             { key: 'Mod-d', run: function () { calque.duplicateSelection(); return true; } },
+            { key: 'Shift-Alt-f', run: function () { calque.formatAll(); return true; } },
             { key: 'ArrowUp', run: function () { return calque.stepSelected(1, false); }, shift: function () { return calque.stepSelected(1, true); } },
             { key: 'ArrowDown', run: function () { return calque.stepSelected(-1, false); }, shift: function () { return calque.stepSelected(-1, true); } }
         ];
@@ -549,7 +836,9 @@
 
     // «_имя = выражение» внутри группы — формула. Считается, когда группа закрыта,
     // поэтому порядок строк не важен. «(%)» в конце дописывает к значению знак %
-    var FORMULA_RE = /^\s*_([\p{L}][\p{L}\p{N}_]*)\s*=\s*(.+?)\s*(\(%\))?\s*$/u;
+    var FORMULA_RE = /^\s*(__?)([\p{L}][\p{L}\p{N}_]*)\s*=\s*(.+?)\s*(\(%\))?\s*$/u;
+    // «_имя» без выражения в строке таблицы — показать здесь формулу группы
+    var INHERIT_RE = /^\s*__?([\p{L}][\p{L}\p{N}_]*)\s*$/u;
 
     // Поля строки таблицы поверх общей области видимости
     function Overlay(parent, values) { this.p = parent; this.v = values; }
@@ -610,6 +899,7 @@
         calque.lines = [];
         calque.tree = new Tree();
         calque.suffix = {};
+        calque.defs = {};
         var scope = calque.scope = new Map();
         scope.set('last', null);
 
@@ -670,7 +960,8 @@
                 g.groups.forEach(function (c) {
                     var values = Object.assign({}, c.named, fieldsOf(c));
                     c.computed = {};
-                    evaluateFormulas(g.formulas, values, function (f, v) {
+                    var applicable = g.formulas.filter(function (f) { return !c.own[f.name]; });
+                    evaluateFormulas(applicable, values, function (f, v) {
                         c.computed[f.name] = v;
                         c.named[f.name] = v;
                         var n = calque.tree.add(c.path.concat([f.name]), c.line);
@@ -745,10 +1036,25 @@
                     c.line.record = true;
                     c.line.result = undefined;
                     c.error = null;
+                    c.line.groupError = null;
                     setGroupValue(c, rowFields(c));
                     c.leaves.forEach(function (l) { if (l.fieldName) l.pctBase = fields[l.fieldName]; });
-                    c.line.rowFields = c.computed && Object.keys(c.computed).length ? c.computed : null;
+                    var shown = {};
+                    g.formulas.forEach(function (f) {
+                        if (f.rows && c.computed && c.computed[f.name] !== undefined) shown[f.name] = c.computed[f.name];
+                    });
+                    c.line.rowFields = Object.keys(shown).length ? shown : null;
                     c.line.rowBases = fields;
+
+                    // «_имя» в строке: значение формулы группы для этой строки
+                    c.inherits.forEach(function (l) {
+                        if (c.computed && c.computed[l.formula] !== undefined) {
+                            l.result = c.computed[l.formula];
+                            l.pctBase = fields[l.formula];
+                        } else if (!c.own[l.formula]) {
+                            l.error = 'У группы «' + g.name + '» нет формулы «_' + l.formula + '»';
+                        }
+                    });
                 });
                 g.leaves.forEach(function (l) { if (l.fieldName) l.pctBase = fields[l.fieldName]; });
             } else if (g.formulas.length) {
@@ -756,23 +1062,23 @@
                 line.record = true;
                 line.result = undefined;
                 setGroupValue(g, fieldsOf(g));
-                var own = {};
-                g.formulas.forEach(function (f) { if (f.line.result !== undefined) own[f.name] = f.line.result; });
-                line.rowFields = own;
+                line.rowFields = null;
             } else {
-                var sum = 0;
+                var sum;
                 var items = g.leaves.slice();
                 g.groups.forEach(function (c) { if (!c.fields) items.push(c.line); });
                 items.forEach(function (l) {
-                    try { sum = math.add(sum, l.result); }
+                    try { sum = addValues(sum, l.result); }
                     catch (e) { g.error = e.message || e.toString(); }
                 });
+                if (sum === undefined) sum = 0;
                 line.result = sum;
                 setGroupValue(g, sum);
                 items.forEach(function (l) { l.pctBase = sum; });
             }
 
             line.groupError = g.error;
+
         }
 
         function closeUntil(indent) {
@@ -813,7 +1119,7 @@
                 line.children = [];
                 var path = (parent ? parent.path : []).concat([line.summing]);
                 var node = calque.tree.add(path, line);
-                var g = { line: line, indent: line.indent, name: line.summing, path: path, node: node, leaves: [], groups: [], named: {}, formulas: [], error: null };
+                var g = { line: line, indent: line.indent, name: line.summing, path: path, node: node, leaves: [], groups: [], named: {}, formulas: [], own: {}, inherits: [], error: null };
                 if (parent) parent.groups.push(g);
                 stack.push(g);
                 return;
@@ -825,15 +1131,23 @@
             var fm = parent && bare.match(FORMULA_RE);
             if (fm) {
                 try {
-                    var key = 'formula:' + fm[2];
-                    if (!calque.cache[key]) calque.cache[key] = { parsed: math.parse(fm[2]) };
-                    line.formula = fm[1];
+                    var key = 'formula:' + fm[3];
+                    if (!calque.cache[key]) calque.cache[key] = { parsed: math.parse(fm[3]) };
+                    line.formula = fm[2];
                     line.parsed = calque.cache[key].parsed;
-                    if (fm[3]) calque.suffix[fm[1]] = '%';
-                    parent.formulas.push({ name: fm[1], node: line.parsed, line: line });
+                    if (fm[4]) calque.suffix[fm[2]] = '%';
+                    parent.formulas.push({ name: fm[2], node: line.parsed, line: line, rows: fm[1] === '__' });
+                    parent.own[fm[2]] = true;
                 } catch (e) {
                     line.error = e.message || e.toString();
                 }
+                return;
+            }
+            var im = parent && bare.match(INHERIT_RE);
+            if (im) {
+                line.formula = im[1];
+                line.inherit = true;
+                parent.inherits.push(line);
                 return;
             }
 
@@ -859,6 +1173,8 @@
             if (line.result === undefined) return;
 
             var named = line.parsed && line.parsed.isAssignmentNode && line.parsed.object.isSymbolNode;
+            if (named) calque.defs[line.parsed.object.name] = line;
+            if (line.parsed && line.parsed.isFunctionAssignmentNode) calque.defs[line.parsed.name] = line;
 
             // Значение внутри группы доступно и по полному пути
             if (parent && named) {
@@ -877,6 +1193,13 @@
 
         closeUntil(0);
         while (stack.length) closeGroup(stack.pop());
+
+        // «_имя», которому не нашлось формулы у родительской таблицы
+        calque.lines.forEach(function (l) {
+            if (l.inherit && l.result === undefined && !l.error) {
+                l.error = 'Формулы «_' + l.formula + '» нет у родительской группы';
+            }
+        });
     };
 
     // Число с единицей вроде «100 г» или «15 ккал / (100 г)» — без переменных
@@ -920,7 +1243,8 @@
             type = 'empty';
         } else if (line.parsed.isAssignmentNode && line.parsed.value.isConstantNode) {
             type = 'empty';
-        } else if (line.parsed.isAssignmentNode && isPlainQuantity(line.parsed.value)) {
+        } else if (line.parsed.isAssignmentNode && isPlainQuantity(line.parsed.value) &&
+            formatValue(line.result).replace(/[\s\u00a0]/g, '') === line.parsed.value.toString().replace(/\s/g, '')) {
             type = 'empty';
         } else {
             type = 'result';
@@ -1020,6 +1344,12 @@
         this.replaceRange(target.start, target.end, stepNumber(target.text, direction, big), true);
     };
 
+    Calque.prototype.updateHistoryButtons = function () {
+        if (!this.undoButton) return;
+        this.undoButton.disabled = CM.undoDepth(this.view.state) === 0;
+        this.redoButton.disabled = CM.redoDepth(this.view.state) === 0;
+    };
+
     Calque.prototype.toast = function (message) {
         var calque = this;
         if (!calque.toastEl) {
@@ -1053,7 +1383,9 @@
             return b;
         }
 
-        button('−10', 'Уменьшить число на 10 шагов', function () { calque.stepAtCaret(-1, true); });
+        calque.undoButton = button('↶', 'Отменить', function () { CM.undo(calque.view); });
+        calque.redoButton = button('↷', 'Повторить', function () { CM.redo(calque.view); });
+        button('−10', 'Уменьшить число на 10 шагов', function () { calque.stepAtCaret(-1, true); }, 'gap');
         button('−1', 'Уменьшить число', function () { calque.stepAtCaret(-1, false); });
         button('+1', 'Увеличить число', function () { calque.stepAtCaret(1, false); });
         button('+10', 'Увеличить число на 10 шагов', function () { calque.stepAtCaret(1, true); });
@@ -1071,6 +1403,8 @@
                 return copyText(url).then(function () { calque.toast('Ссылка скопирована'); });
             });
         });
+
+        calque.updateHistoryButtons();
 
         // Держим панель над экранной клавиатурой
         if (window.visualViewport) {
